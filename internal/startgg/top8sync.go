@@ -111,7 +111,7 @@ func SyncTop8Characters(startggClient *http.Client, startggToken, apiKey string,
 	}
 	model := os.Getenv("GEMINI_MODEL")
 	if model == "" {
-		model = "gemini-1.5-flash"
+		model = "gemini-2.0-flash" // <-- Actualizado aquí
 	}
 	ctx := context.Background()
 	httpClient := &http.Client{Timeout: 2 * time.Minute}

@@ -83,7 +83,7 @@ func AnalyzeTop8Image(ctx context.Context, _ *http.Client, apiKey, modelName str
 	defer client.Close()
 
 	if modelName == "" {
-		modelName = "gemini-1.5-flash"
+		modelName = "gemini-2.0-flash" // <-- Actualizado aquí
 	}
 
 	model := client.GenerativeModel(modelName)
