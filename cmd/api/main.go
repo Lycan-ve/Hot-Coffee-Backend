@@ -80,7 +80,7 @@ type TournamentDetail struct {
 }
 
 func InitDatabase() {
-	dsn := "host=localhost user=postgres password=root dbname=power_ranking port=5432 sslmode=disable TimeZone=America/Caracas"
+	dsn := os.Getenv("DATABASE_URL")
 	var err error
 	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
