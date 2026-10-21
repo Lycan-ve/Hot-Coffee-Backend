@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"time"
 
 	"smash-backend/internal/models"
 	"smash-backend/internal/startgg"
@@ -47,33 +46,12 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 }
 
 func runFullSync(jsonFile, startGGToken string, db *gorm.DB) {
-	log.Printf("🔄 Iniciando sincronización completa desde Discord...\n")
+	log.Printf("🔄 Iniciando sincronización de torneos desde Start.gg...\n")
 
-	// 1. Sincronizar torneos y puntos desde Start.gg
+	// Sincroniza únicamente los torneos y distribuye puntos enfocados en el Top 8
 	startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
 
-	// 2. Cargar mensajes de Discord para extraer imágenes del Top 8
-	file, err := os.Open(jsonFile)
-	if err != nil {
-		log.Printf("❌ Error al abrir el JSON de Discord: %v\n", err)
-		return
-	}
-	defer file.Close()
-
-	var exportData struct {
-		Messages []startgg.DiscordMessage `json:"messages"`
-	}
-	if err := json.NewDecoder(file).Decode(&exportData); err != nil {
-		log.Printf("❌ Error al decodificar JSON: %v\n", err)
-		return
-	}
-
-	// 3. Analizar imágenes con Gemini (Gratis) y guardar dúos en la DB
-	geminiKey := os.Getenv("GEMINI_API_KEY")
-	client := &http.Client{Timeout: 30 * time.Second}
-
-	log.Printf("🖼️ Analizando imágenes del Top 8 con Gemini Gratuito...\n")
-	startgg.SyncTop8Characters(client, startGGToken, geminiKey, db, exportData.Messages)
+	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
 
 func main() {
@@ -101,7 +79,7 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Write([]byte(`{"status": "success", "message": "Sincronización iniciada con Gemini."}`))
+		w.Write([]byte(`{"status": "success", "message": "Sincronización de torneos iniciada."}`))
 	})
 
 	port := ":8080"

@@ -350,6 +350,12 @@ func applyStandings(tx *gorm.DB, nodes []standingNode) error {
 			gamerTag = parts[1]
 		}
 
+		// 🚫 REQUERIMIENTO: Omitir si el gamerTag o nombre es "delete-user"
+		if strings.EqualFold(gamerTag, "delete-user") || strings.EqualFold(rawName, "delete-user") {
+			log.Printf("   ⏭️  Omitiendo usuario bloqueado/eliminado: %s\n", rawName)
+			continue
+		}
+
 		for _, participant := range node.Entrant.Participants {
 			playerID := participant.Player.ID
 			if playerID == 0 {
@@ -417,13 +423,8 @@ func calculatePoints(placement int) int {
 		return 20
 	case placement >= 7 && placement <= 8:
 		return 10
-	case placement >= 9 && placement <= 12:
-		return 5
-	case placement >= 13 && placement <= 16:
-		return 3
-	case placement > 16:
-		return 1
 	default:
+		// 🎯 REQUERIMIENTO: Del puesto 9 en adelante no otorgan puntos (solo Top 8)
 		return 0
 	}
 }
