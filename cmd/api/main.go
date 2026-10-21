@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"smash-backend/internal/models"
 	"smash-backend/internal/startgg"
@@ -45,6 +46,36 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	json.NewEncoder(w).Encode(players)
 }
 
+func runFullSync(jsonFile, startGGToken string, db *gorm.DB) {
+	log.Printf("🔄 Iniciando sincronización completa desde Discord...\n")
+
+	// 1. Sincronizar torneos y puntos desde Start.gg
+	startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
+
+	// 2. Cargar mensajes de Discord para extraer imágenes del Top 8
+	file, err := os.Open(jsonFile)
+	if err != nil {
+		log.Printf("❌ Error al abrir el JSON de Discord: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	var exportData struct {
+		Messages []startgg.DiscordMessage `json:"messages"`
+	}
+	if err := json.NewDecoder(file).Decode(&exportData); err != nil {
+		log.Printf("❌ Error al decodificar JSON: %v\n", err)
+		return
+	}
+
+	// 3. Analizar imágenes con Gemini (Gratis) y guardar dúos en la DB
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	log.Printf("🖼️ Analizando imágenes del Top 8 con Gemini Gratuito...\n")
+	startgg.SyncTop8Characters(client, startGGToken, geminiKey, db, exportData.Messages)
+}
+
 func main() {
 	godotenv.Load()
 	InitDatabase()
@@ -52,28 +83,25 @@ func main() {
 	startGGToken := os.Getenv("STARTGG_TOKEN")
 	jsonFile := "Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json"
 
-	// 🚀 Automatización: Se ejecuta automáticamente al arrancar el servidor en segundo plano
 	if startGGToken != "" {
 		go func() {
-			fmt.Println("🔄 Iniciando sincronización automática desde Discord...")
-			startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
+			runFullSync(jsonFile, startGGToken, db)
 		}()
 	} else {
-		log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el archivo .env")
+		log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el .env")
 	}
 
-	// Endpoints de la API
 	http.HandleFunc("/api/rankings/2xko", func(w http.ResponseWriter, r *http.Request) {
 		HandleGetRankings(w, r, "2xko_online")
 	})
 
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 		if startGGToken != "" {
-			go startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
+			go runFullSync(jsonFile, startGGToken, db)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Write([]byte(`{"status": "success", "message": "Sincronización manual iniciada."}`))
+		w.Write([]byte(`{"status": "success", "message": "Sincronización iniciada con Gemini."}`))
 	})
 
 	port := ":8080"
