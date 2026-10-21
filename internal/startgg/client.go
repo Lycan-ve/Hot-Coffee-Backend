@@ -3,150 +3,287 @@ package startgg
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
-	"smash-backend/internal/models"
+	"regexp"
 	"strings"
+	"time"
+
+	"smash-backend/internal/models" // Cambia "your_project_module" por el nombre de tu módulo en go.mod
+
+	"gorm.io/gorm"
 )
 
-const startGGAPI = "https://api.start.gg/gql/alpha"
+type Attachment struct {
+	URL      string `json:"url"`
+	FileName string `json:"fileName"`
+}
 
-// FetchHotCoffeeTournaments busca los torneos online de 2XKO a nivel nacional
-// filtrando por la marca "Hot Coffee", juego "2XKO" o administración de "Baneado Sensei".
-func FetchHotCoffeeTournaments() (*models.StartGGResponse, error) {
-	token := os.Getenv("STARTGG_TOKEN")
-	fmt.Println("Token cargado correctamente, longitud:", len(token))
-	if token == "" {
-		return nil, fmt.Errorf("STARTGG_TOKEN no está definido")
-	}
+type ForwardedMessage struct {
+	Content     string       `json:"content"`
+	Attachments []Attachment `json:"attachments"`
+}
 
-	// Consulta GraphQL optimizada para torneos online con extracción masiva de standings (hasta 100 jugadores por evento)
-	query := `
-    query OnlineTournaments($perPage: Int!, $page: Int!) {
-        tournaments(query: {
-            perPage: $perPage,
-            page: $page,
-            filter: {
-                isOnline: true
-            }
-        }) {
-            nodes {
-                id
-                name
-                slug
-                isOnline
-                admins {
-                    name
-                    gamerTag
-                }
-                events {
-                    id
-                    name
-                    videogame {
-                        id
-                        name
-                    }
-                    standings(query: { perPage: 100, page: 1 }) {
-                        nodes {
-                            placement
-                            entrant {
-                                name
-                                participants {
-                                    player {
-                                        id
-                                        gamerTag
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }`
+type DiscordMessage struct {
+	Content          string            `json:"content"`
+	Attachments      []Attachment      `json:"attachments"`
+	ForwardedMessage *ForwardedMessage `json:"forwardedMessage"`
+}
 
-	payload := models.GraphQLPayload{
-		Query: query,
-		Variables: map[string]interface{}{
-			"perPage": 50,
-			"page":    1,
-		},
-	}
+type DiscordExport struct {
+	Messages []DiscordMessage `json:"messages"`
+}
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
+type TournamentDetail struct {
+	Data struct {
+		Tournament struct {
+			Name   string `json:"name"`
+			Events []struct {
+				ID        int    `json:"id"`
+				Name      string `json:"name"`
+				Videogame struct {
+					ID   int    `json:"id"`
+					Name string `json:"name"`
+				} `json:"videogame"`
+				Standings struct {
+					Nodes []struct {
+						Placement int `json:"placement"`
+						Entrant   struct {
+							Name         string `json:"name"`
+							Participants []struct {
+								Player struct {
+									ID   int `json:"id"`
+									User struct {
+										Images []struct {
+											Type string `json:"type"`
+											URL  string `json:"url"`
+										} `json:"images"`
+									} `json:"user"`
+								} `json:"player"`
+							} `json:"participants"`
+						} `json:"entrant"`
+					} `json:"nodes"`
+				} `json:"standings"`
+			} `json:"events"`
+		} `json:"tournament"`
+	} `json:"data"`
+}
 
-	req, err := http.NewRequest("POST", startGGAPI, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, err
-	}
+type TournamentInfo struct {
+	Slug       string
+	Top8ImgURL string
+}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+func ExtractTournamentsAndImages(messages []DiscordMessage) []TournamentInfo {
+	tournamentMap := make(map[string]string)
+	re := regexp.MustCompile(`start\.gg/tournament/([a-zA-Z0-9\-_]+)`)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	for _, msg := range messages {
+		content := msg.Content
+		var attachments []Attachment = msg.Attachments
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var response models.StartGGResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, err
-	}
-
-	if len(response.Errors) > 0 {
-		return nil, fmt.Errorf("error de la API Start.gg: %s", response.Errors[0].Message)
-	}
-
-	// Filtrado inteligente en Go para capturar Hot Coffee, 2XKO o torneos de Baneado Sensei
-	var filteredTournaments []models.TournamentNode
-	for _, t := range response.Data.Tournaments.Nodes {
-		tNameLower := strings.ToLower(t.Name)
-		tSlugLower := strings.ToLower(t.Slug)
-
-		isHotCoffee := strings.Contains(tNameLower, "hot coffee") || strings.Contains(tSlugLower, "hot-coffee")
-		is2XKO := strings.Contains(tNameLower, "2xko")
-
-		hasBaneadoSensei := false
-		for _, admin := range t.Admins {
-			adminStr := strings.ToLower(admin.Name + " " + admin.GamerTag)
-			if strings.Contains(adminStr, "baneado") || strings.Contains(adminStr, "sensei") {
-				hasBaneadoSensei = true
-				break
-			}
+		if msg.ForwardedMessage != nil {
+			content += " " + msg.ForwardedMessage.Content
+			attachments = append(attachments, msg.ForwardedMessage.Attachments...)
 		}
 
-		// Si pertenece al circuito o es administrado por Baneado Sensei
-		if isHotCoffee || is2XKO || hasBaneadoSensei {
-			var validEvents []models.EventNode
-			for _, ev := range t.Events {
-				vgName := strings.ToLower(ev.Videogame.Name)
-				evName := strings.ToLower(ev.Name)
-				// Asegurar que el evento corresponda a 2XKO
-				if strings.Contains(vgName, "2xko") || strings.Contains(evName, "2xko") {
-					validEvents = append(validEvents, ev)
+		matches := re.FindAllStringSubmatch(content, -1)
+		var imgURL string
+		if len(attachments) > 0 {
+			imgURL = attachments[0].URL
+		}
+
+		for _, match := range matches {
+			if len(match) > 1 {
+				slug := match[1]
+				tournamentMap[slug] = imgURL
+			}
+		}
+	}
+
+	var results []TournamentInfo
+	for slug, img := range tournamentMap {
+		results = append(results, TournamentInfo{Slug: slug, Top8ImgURL: img})
+	}
+	return results
+}
+
+func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.DB) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Printf("❌ Error al abrir el archivo de Discord: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	var exportData DiscordExport
+	if err := json.NewDecoder(file).Decode(&exportData); err != nil {
+		log.Printf("❌ Error al decodificar el JSON: %v\n", err)
+		return
+	}
+
+	tournaments := ExtractTournamentsAndImages(exportData.Messages)
+	log.Printf("🔍 Se encontraron %d torneos únicos en el canal de Discord.\n", len(tournaments))
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	leagueType := "2xko_online"
+
+	for _, t := range tournaments {
+		log.Printf("📥 Procesando torneo Start.gg [Slug: %s]\n", t.Slug)
+
+		detailQuery := `
+			query TournamentDetails($slug: String!) {
+				tournament(slug: $slug) {
+					name
+					events {
+						id
+						name
+						videogame {
+							id
+							name
+						}
+						standings(query: { perPage: 100, page: 1 }) {
+							nodes {
+								placement
+								entrant {
+									name
+									participants {
+										player {
+											id
+											user {
+												images {
+													type
+													url
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
 				}
 			}
+		`
 
-			if len(validEvents) > 0 {
-				t.Events = validEvents
-				filteredTournaments = append(filteredTournaments, t)
+		detailBody, _ := json.Marshal(map[string]interface{}{
+			"query": detailQuery,
+			"variables": map[string]interface{}{
+				"slug": t.Slug,
+			},
+		})
+
+		detailReq, _ := http.NewRequest("POST", "https://api.start.gg/gql/alpha", bytes.NewBuffer(detailBody))
+		detailReq.Header.Set("Authorization", "Bearer "+apiToken)
+		detailReq.Header.Set("Content-Type", "application/json")
+
+		detailResp, err := client.Do(detailReq)
+		if err != nil {
+			continue
+		}
+
+		detailBytes, _ := io.ReadAll(detailResp.Body)
+		detailResp.Body.Close()
+
+		var detailResult TournamentDetail
+		if json.Unmarshal(detailBytes, &detailResult) != nil {
+			continue
+		}
+
+		for _, event := range detailResult.Data.Tournament.Events {
+			vgName := strings.ToLower(event.Videogame.Name)
+			if strings.Contains(vgName, "street fighter") || strings.Contains(vgName, "sf6") {
+				continue
+			}
+
+			for _, node := range event.Standings.Nodes {
+				earnedPoints := calculatePoints(node.Placement)
+				if earnedPoints == 0 {
+					continue
+				}
+
+				rawName := node.Entrant.Name
+				sponsor := ""
+				gamerTag := rawName
+
+				if strings.Contains(rawName, " | ") {
+					parts := strings.SplitN(rawName, " | ", 2)
+					sponsor = parts[0]
+					gamerTag = parts[1]
+				}
+
+				for _, participant := range node.Entrant.Participants {
+					playerID := participant.Player.ID
+					if playerID == 0 {
+						continue
+					}
+
+					avatarURL := ""
+					for _, img := range participant.Player.User.Images {
+						if img.Type == "profile" {
+							avatarURL = img.URL
+							break
+						}
+					}
+					if avatarURL == "" && len(participant.Player.User.Images) > 0 {
+						avatarURL = participant.Player.User.Images[0].URL
+					}
+
+					var player models.Player
+					err := db.First(&player, "id = ? AND league = ?", playerID, leagueType).Error
+
+					if err != nil {
+						player = models.Player{
+							ID:        playerID,
+							League:    leagueType,
+							GamerTag:  gamerTag,
+							Sponsor:   sponsor,
+							Character: "2XKO_FIGHTER",
+							AvatarURL: avatarURL,
+							Points:    earnedPoints,
+						}
+						db.Create(&player)
+					} else {
+						player.Points += earnedPoints
+						player.GamerTag = gamerTag
+						if sponsor != "" {
+							player.Sponsor = sponsor
+						}
+						if avatarURL != "" {
+							player.AvatarURL = avatarURL
+						}
+						db.Save(&player)
+					}
+				}
 			}
 		}
 	}
+	log.Printf("✅ Sincronización completa con los torneos de Discord.\n")
+}
 
-	response.Data.Tournaments.Nodes = filteredTournaments
-
-	return &response, nil
+func calculatePoints(placement int) int {
+	switch {
+	case placement == 1:
+		return 100
+	case placement == 2:
+		return 70
+	case placement == 3:
+		return 50
+	case placement == 4:
+		return 35
+	case placement >= 5 && placement <= 6:
+		return 20
+	case placement >= 7 && placement <= 8:
+		return 10
+	case placement >= 9 && placement <= 12:
+		return 5
+	case placement >= 13 && placement <= 16:
+		return 3
+	case placement > 16:
+		return 1
+	default:
+		return 0
+	}
 }
