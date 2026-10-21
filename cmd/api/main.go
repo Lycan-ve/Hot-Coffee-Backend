@@ -28,7 +28,7 @@ func InitDatabase() {
 		log.Fatal("❌ Error al conectar a la base de datos:", err)
 	}
 
-	db.AutoMigrate(&models.Player{})
+	db.AutoMigrate(&models.Player{}, &startgg.ProcessedEvent{})
 	fmt.Println("✅ Base de datos conectada y migrada correctamente.")
 }
 
@@ -50,20 +50,30 @@ func main() {
 	InitDatabase()
 
 	startGGToken := os.Getenv("STARTGG_TOKEN")
+	jsonFile := "Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json"
 
+	// 🚀 Automatización: Se ejecuta automáticamente al arrancar el servidor en segundo plano
+	if startGGToken != "" {
+		go func() {
+			fmt.Println("🔄 Iniciando sincronización automática desde Discord...")
+			startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
+		}()
+	} else {
+		log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el archivo .env")
+	}
+
+	// Endpoints de la API
 	http.HandleFunc("/api/rankings/2xko", func(w http.ResponseWriter, r *http.Request) {
 		HandleGetRankings(w, r, "2xko_online")
 	})
 
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
-		// Ruta al archivo JSON exportado de Discord (puedes colocarlo en la raíz del proyecto)
-		jsonFile := "Hot Coffee _ 2XKO - TORNEOS HOT COFFEE [1430651477612826624].json"
 		if startGGToken != "" {
 			go startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Write([]byte(`{"status": "success", "message": "Sincronización iniciada leyendo el canal de Discord."}`))
+		w.Write([]byte(`{"status": "success", "message": "Sincronización manual iniciada."}`))
 	})
 
 	port := ":8080"
