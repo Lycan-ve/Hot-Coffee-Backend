@@ -46,10 +46,13 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 }
 
 func runFullSync(jsonFile, startGGToken string, db *gorm.DB) {
-	log.Printf("🔄 Iniciando sincronización de torneos desde Start.gg...\n")
+	log.Printf("🔄 Iniciando sincronización completa...\n")
 
-	// Sincroniza únicamente los torneos y distribuye puntos enfocados en el Top 8
+	// 1. Sincronizar torneos automáticos de Start.gg
 	startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
+
+	// 2. Indexar torneos manuales (Hot Coffee #1 y #2)
+	startgg.SyncManualTournaments(db)
 
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
