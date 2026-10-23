@@ -29,7 +29,7 @@ func InitDatabase() {
 		log.Fatal("❌ Error al conectar a la base de datos:", err)
 	}
 
-	db.AutoMigrate(&models.Player{}, &startgg.ProcessedEvent{})
+	db.AutoMigrate(&models.Player{}, &startgg.ProcessedEvent{}, &models.PlayerResult{})
 	fmt.Println("✅ Base de datos conectada y migrada correctamente.")
 }
 

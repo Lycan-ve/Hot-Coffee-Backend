@@ -17,3 +17,12 @@ type TournamentRecord struct {
 	Name      string `json:"name"`
 	Top8Image string `json:"top8Image"` // URL de la imagen de Discord del Top 8
 }
+
+type PlayerResult struct {
+	ID               uint   `gorm:"primaryKey"`
+	PlayerID         int    `gorm:"uniqueIndex:idx_player_event"`
+	League           string `gorm:"uniqueIndex:idx_player_event"`
+	EventID          int64  `gorm:"uniqueIndex:idx_player_event"`
+	TournamentNumber int    `gorm:"index"` // 1..17, el que usa el range picker
+	Points           int
+}
