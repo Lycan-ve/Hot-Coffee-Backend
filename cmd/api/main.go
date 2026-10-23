@@ -44,15 +44,16 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	var err error
 
 	if errFrom == nil && errTo == nil {
-		// Ranking de un rango: sumar solo los puntos de esos torneos
 		err = db.Table("players").
-			Select(`players.id, players.gamer_tag, players.sponsor,
-			        players.character, players.avatar_url,
-			        SUM(tournament_records.points) AS points`).
-			Joins("JOIN tournament_records ON tournament_records.player_id = players.id").
-			Where("players.league = ? AND tournament_records.tournament_number BETWEEN ? AND ?",
+			Select(`players.id, players.league, players.gamer_tag, players.sponsor,
+		        players.character, players.avatar_url,
+		        SUM(player_results.points) AS points`).
+			Joins(`JOIN player_results
+		       ON player_results.player_id = players.id
+		       AND player_results.league = players.league`).
+			Where("players.league = ? AND player_results.tournament_number BETWEEN ? AND ?",
 				league, from, to).
-			Group("players.id").
+			Group("players.id, players.league").
 			Order("points DESC").
 			Scan(&players).Error
 	} else {
