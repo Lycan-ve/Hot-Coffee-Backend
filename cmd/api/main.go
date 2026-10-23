@@ -81,6 +81,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 
 func runFullSync(jsonFile, startGGToken string, db *gorm.DB) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
+	startgg.CleanupDuplicatePlayers(db) // 🆕
 	startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
 	startgg.SyncManualTournaments(db)
 	log.Printf("✅ Sincronización de torneos finalizada.\n")

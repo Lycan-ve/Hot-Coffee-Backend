@@ -72,14 +72,16 @@ func SyncManualTournaments(db *gorm.DB) {
 					continue
 				}
 
-				syntheticID := hashGamerTag(item.GamerTag)
+				// 🆕 ¿este tag es en realidad una cuenta que ya existe?
+				playerID := resolveManualPlayerID(tx, item.GamerTag)
+				isAlias := playerID != hashGamerTag(item.GamerTag)
 
 				var player models.Player
-				err := tx.First(&player, "id = ? AND league = ?", syntheticID, leagueType).Error
+				err := tx.First(&player, "id = ? AND league = ?", playerID, leagueType).Error
 				switch {
 				case errors.Is(err, gorm.ErrRecordNotFound):
 					player = models.Player{
-						ID:        syntheticID,
+						ID:        playerID,
 						League:    leagueType,
 						GamerTag:  item.GamerTag,
 						Character: "2XKO_FIGHTER",
@@ -92,14 +94,15 @@ func SyncManualTournaments(db *gorm.DB) {
 					return err
 				default:
 					player.Points += earnedPoints
-					player.GamerTag = item.GamerTag
+					if !isAlias { // 🆕 no renombrar la cuenta real con el tag manual
+						player.GamerTag = item.GamerTag
+					}
 					if err := tx.Save(&player).Error; err != nil {
 						return err
 					}
 				}
 
-				// 🆕 guardar los puntos de ESTE torneo
-				if err := recordResult(tx, syntheticID, t.EventID, earnedPoints); err != nil {
+				if err := recordResult(tx, playerID, t.EventID, earnedPoints); err != nil {
 					return err
 				}
 			}

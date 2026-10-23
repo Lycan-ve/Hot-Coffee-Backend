@@ -360,15 +360,23 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 			gamerTag = parts[1]
 		}
 
-		if strings.EqualFold(gamerTag, "delete-user") || strings.EqualFold(rawName, "delete-user") {
+		if strings.EqualFold(gamerTag, "delete-user") || strings.EqualFold(rawName, "delete-user") ||
+			strings.EqualFold(gamerTag, "deleted user") || strings.EqualFold(rawName, "deleted user") {
 			log.Printf("   ⏭️  Omitiendo usuario bloqueado/eliminado: %s\n", rawName)
 			continue
 		}
 
 		for _, participant := range node.Entrant.Participants {
 			playerID := participant.Player.ID
-			if playerID == 0 {
+			if playerID == 0 || blockedPlayerIDs[playerID] { // 🆕
 				continue
+			}
+
+			// 🆕 cuenta duplicada: los puntos van a la cuenta real
+			merged := false
+			if realID, ok := playerIDAliases[playerID]; ok {
+				playerID = realID
+				merged = true
 			}
 
 			avatarURL := ""
@@ -402,19 +410,20 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 				return err
 			default:
 				player.Points += earnedPoints
-				player.GamerTag = gamerTag
-				if sponsor != "" {
-					player.Sponsor = sponsor
-				}
-				if avatarURL != "" {
-					player.AvatarURL = avatarURL
+				if !merged { // 🆕 la cuenta duplicada no pisa el tag/avatar de la real
+					player.GamerTag = gamerTag
+					if sponsor != "" {
+						player.Sponsor = sponsor
+					}
+					if avatarURL != "" {
+						player.AvatarURL = avatarURL
+					}
 				}
 				if err := tx.Save(&player).Error; err != nil {
 					return err
 				}
 			}
 
-			// 🆕 guardar los puntos de ESTE torneo
 			if err := recordResult(tx, playerID, eventID, earnedPoints); err != nil {
 				return err
 			}
