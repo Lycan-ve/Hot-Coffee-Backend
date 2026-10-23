@@ -444,6 +444,13 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 				}
 			}
 
+			log.Printf("Jugador: %s | User ID: %d | Slug: '%s' | Imágenes: %d\n",
+				gamerTag,
+				participant.Player.ID,
+				participant.Player.User.Slug,
+				len(participant.Player.User.Images),
+			)
+
 			if err := recordResult(tx, playerID, eventID, earnedPoints); err != nil {
 				return err
 			}
