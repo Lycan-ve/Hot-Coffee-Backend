@@ -19,10 +19,9 @@ type TournamentRecord struct {
 }
 
 type PlayerResult struct {
-	ID               uint   `gorm:"primaryKey"`
-	PlayerID         int    `gorm:"uniqueIndex:idx_player_event"`
-	League           string `gorm:"uniqueIndex:idx_player_event"`
-	EventID          int64  `gorm:"uniqueIndex:idx_player_event"`
-	TournamentNumber int    `gorm:"index"` // 1..17, el que usa el range picker
-	Points           int
+	ID       uint   `gorm:"primaryKey"`
+	PlayerID int    `gorm:"uniqueIndex:idx_player_event"`
+	League   string `gorm:"uniqueIndex:idx_player_event"`
+	EventID  int64  `gorm:"uniqueIndex:idx_player_event"`
+	Points   int
 }

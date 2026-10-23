@@ -50,18 +50,20 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	var err error
 
 	if useRange {
-		err = db.Table("players").
-			Select(`players.id, players.league, players.gamer_tag, players.sponsor,
-			        players.character, players.avatar_url,
-			        SUM(player_results.points) AS points`).
-			Joins(`JOIN player_results
-			       ON player_results.player_id = players.id
-			       AND player_results.league = players.league`).
-			Where("players.league = ? AND player_results.tournament_number BETWEEN ? AND ?",
-				league, from, to).
-			Group("players.id, players.league").
-			Order("points DESC").
-			Scan(&players).Error
+		err = db.Raw(`
+		SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url,
+		       SUM(pr.points) AS points
+		FROM players p
+		JOIN player_results pr
+		  ON pr.player_id = p.id AND pr.league = p.league
+		JOIN (
+		  SELECT event_id, ROW_NUMBER() OVER (ORDER BY event_id) AS tournament_number
+		  FROM processed_events
+		) pe ON pe.event_id = pr.event_id
+		WHERE p.league = ? AND pe.tournament_number BETWEEN ? AND ?
+		GROUP BY p.id, p.league
+		ORDER BY points DESC`,
+			league, from, to).Scan(&players).Error
 	} else {
 		err = db.Where("league = ?", league).Order("points DESC").Find(&players).Error
 	}
@@ -109,6 +111,14 @@ func main() {
 
 	http.HandleFunc("/api/rankings/2xko", func(w http.ResponseWriter, r *http.Request) {
 		HandleGetRankings(w, r, "2xko_online")
+	})
+
+	http.HandleFunc("/api/tournaments/count", func(w http.ResponseWriter, r *http.Request) {
+		var n int64
+		db.Table("processed_events").Count(&n)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		json.NewEncoder(w).Encode(map[string]int64{"count": n})
 	})
 
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
