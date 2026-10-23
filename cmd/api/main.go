@@ -33,9 +33,30 @@ func InitDatabase() {
 }
 
 func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
-	var players []models.Player
-	db.Where("league = ?", league).Order("points DESC").Find(&players)
+	// 1. Capturar los parámetros 'from' y 'to' del Range Picker enviado por el frontend
+	fromQuery := r.URL.Query().Get("from")
+	toQuery := r.URL.Query().Get("to")
 
+	var players []models.Player
+
+	// 2. Dependiendo de cómo tengas estructurada tu base de datos:
+	// Si tienes una tabla de resultados por torneo (ej. tournament_results o similar):
+	if fromQuery != "" && toQuery != "" {
+		// Ejemplo de consulta agrupando y sumando puntos en un rango de torneos/eventos
+		// (Ajusta los nombres de las tablas y campos según tu modelo real en Go)
+		db.Table("players").
+			Select("players.*, SUM(results.points) as points").
+			Joins("JOIN results ON results.player_id = players.id").
+			Where("players.league = ? AND results.tournament_index BETWEEN ? AND ?", league, fromQuery, toQuery).
+			Group("players.id").
+			Order("points DESC").
+			Find(&players)
+	} else {
+		// Si no se envían rangos, muestra el ranking global acumulado normal
+		db.Where("league = ?", league).Order("points DESC").Find(&players)
+	}
+
+	// Asignar la posición numérica (Ranking 1, 2, 3...)
 	for i := range players {
 		players[i].Ranking = i + 1
 	}
