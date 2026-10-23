@@ -22,6 +22,6 @@ type PlayerResult struct {
 	ID       uint   `gorm:"primaryKey"`
 	PlayerID int    `gorm:"uniqueIndex:idx_player_event"`
 	League   string `gorm:"uniqueIndex:idx_player_event"`
-	EventID  int64  `gorm:"uniqueIndex:idx_player_event"`
+	EventID  int    `gorm:"uniqueIndex:idx_player_event"`
 	Points   int
 }

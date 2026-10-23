@@ -16,13 +16,14 @@ import (
 	"smash-backend/internal/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause" // 🆕
 )
 
 const (
 	apiURL           = "https://api.start.gg/gql/alpha"
 	leagueType       = "2xko_online"
-	standingsPerPage = 50                     // pequeño a propósito: Start.gg limita ~1000 objetos por consulta
-	requestDelay     = 800 * time.Millisecond // Start.gg permite ~80 peticiones por minuto
+	standingsPerPage = 50
+	requestDelay     = 800 * time.Millisecond
 	maxRetries       = 3
 )
 
@@ -54,9 +55,6 @@ type TournamentInfo struct {
 }
 
 // ProcessedEvent evita sumar dos veces los puntos del mismo evento.
-// Añádelo a AutoMigrate en main.go:
-//
-//	db.AutoMigrate(&models.Player{}, &startgg.ProcessedEvent{})
 type ProcessedEvent struct {
 	EventID int `gorm:"primaryKey;autoIncrement:false"`
 	Slug    string
@@ -117,7 +115,6 @@ type eventStandingsResp struct {
 	} `json:"event"`
 }
 
-// Consulta LIGERA: solo la lista de eventos del torneo, sin standings.
 const eventsQuery = `
 query TournamentEvents($slug: String!) {
   tournament(slug: $slug) {
@@ -130,7 +127,6 @@ query TournamentEvents($slug: String!) {
   }
 }`
 
-// Standings de UN evento, paginados.
 const standingsQuery = `
 query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
   event(id: $eventId) {
@@ -159,8 +155,6 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// gqlDo hace la petición, respeta el rate limit, reintenta en 429/5xx
-// y DEVUELVE los errores de GraphQL en vez de ignorarlos.
 func gqlDo(client *http.Client, token, query string, vars map[string]interface{}, out interface{}) error {
 	body, err := json.Marshal(map[string]interface{}{"query": query, "variables": vars})
 	if err != nil {
@@ -262,6 +256,22 @@ func ExtractTournamentsAndImages(messages []DiscordMessage) []TournamentInfo {
 	return results
 }
 
+// 🆕 recordResult guarda los puntos de un jugador en UN evento.
+// Si el mismo jugador aparece dos veces en el mismo evento, suma.
+func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "player_id"}, {Name: "league"}, {Name: "event_id"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"points": gorm.Expr("player_results.points + ?", points),
+		}),
+	}).Create(&models.PlayerResult{
+		PlayerID: playerID,
+		League:   leagueType,
+		EventID:  eventID,
+		Points:   points,
+	}).Error
+}
+
 // ---------- Sincronización ----------
 
 func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.DB) {
@@ -317,9 +327,8 @@ func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.D
 				continue
 			}
 
-			// Todo o nada: si algo falla a mitad, no quedan puntos a medias.
 			err = db.Transaction(func(tx *gorm.DB) error {
-				if err := applyStandings(tx, nodes); err != nil {
+				if err := applyStandings(tx, ev.ID, nodes); err != nil { // 🆕 ahora recibe ev.ID
 					return err
 				}
 				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name}).Error
@@ -334,7 +343,8 @@ func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.D
 	log.Printf("✅ Sincronización completa con los torneos de Discord.\n")
 }
 
-func applyStandings(tx *gorm.DB, nodes []standingNode) error {
+// 🆕 firma nueva: recibe eventID
+func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 	for _, node := range nodes {
 		earnedPoints := calculatePoints(node.Placement)
 		if earnedPoints == 0 {
@@ -350,7 +360,6 @@ func applyStandings(tx *gorm.DB, nodes []standingNode) error {
 			gamerTag = parts[1]
 		}
 
-		// 🚫 REQUERIMIENTO: Omitir si el gamerTag o nombre es "delete-user"
 		if strings.EqualFold(gamerTag, "delete-user") || strings.EqualFold(rawName, "delete-user") {
 			log.Printf("   ⏭️  Omitiendo usuario bloqueado/eliminado: %s\n", rawName)
 			continue
@@ -404,6 +413,11 @@ func applyStandings(tx *gorm.DB, nodes []standingNode) error {
 					return err
 				}
 			}
+
+			// 🆕 guardar los puntos de ESTE torneo
+			if err := recordResult(tx, playerID, eventID, earnedPoints); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -424,7 +438,6 @@ func calculatePoints(placement int) int {
 	case placement >= 7 && placement <= 8:
 		return 10
 	default:
-		// 🎯 REQUERIMIENTO: Del puesto 9 en adelante no otorgan puntos (solo Top 8)
 		return 0
 	}
 }

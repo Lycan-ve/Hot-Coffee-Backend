@@ -22,23 +22,21 @@ type ManualTournament struct {
 	Standings []ManualStanding
 }
 
-// SyncManualTournaments permite indexar torneos que no provienen de la API de Start.gg
 func SyncManualTournaments(db *gorm.DB) {
 	manualTournaments := []ManualTournament{
 		{
-			EventID: 900001, // ID ficticio único para Hot Coffee #1
+			EventID: 900001,
 			Slug:    "hot-coffee-manual-1",
 			Name:    "Hot Coffee #1 (Manual)",
 			Standings: []ManualStanding{
-				{GamerTag: "delete-user", Placement: 1}, // O "Baneado"
+				{GamerTag: "delete-user", Placement: 1},
 				{GamerTag: "WS", Placement: 2},
 				{GamerTag: "CRIS", Placement: 3},
 				{GamerTag: "MIYAMURA", Placement: 4},
-				// Agrega el resto del Top 8 si aplica...
 			},
 		},
 		{
-			EventID: 900002, // ID ficticio único para Hot Coffee #2
+			EventID: 900002,
 			Slug:    "hot-coffee-manual-2",
 			Name:    "Hot Coffee #2 (Manual)",
 			Standings: []ManualStanding{
@@ -47,7 +45,7 @@ func SyncManualTournaments(db *gorm.DB) {
 				{GamerTag: "Vesani", Placement: 3},
 				{GamerTag: "Sandor", Placement: 4},
 				{GamerTag: "Pdpiu", Placement: 5},
-				{GamerTag: "delete-user", Placement: 5}, // O "Baneado"
+				{GamerTag: "delete-user", Placement: 5},
 				{GamerTag: "Cris", Placement: 7},
 				{GamerTag: "Gaskman", Placement: 7},
 			},
@@ -69,13 +67,11 @@ func SyncManualTournaments(db *gorm.DB) {
 					continue
 				}
 
-				// Omitir usuario "delete-user" o "baneado"
 				if strings.EqualFold(item.GamerTag, "delete-user") || strings.EqualFold(item.GamerTag, "baneado") {
 					log.Printf("   ⏭️  Omitiendo jugador bloqueado: %s\n", item.GamerTag)
 					continue
 				}
 
-				// ID sintético a partir del nombre para la DB si no hay ID real de Start.gg
 				syntheticID := hashGamerTag(item.GamerTag)
 
 				var player models.Player
@@ -96,14 +92,18 @@ func SyncManualTournaments(db *gorm.DB) {
 					return err
 				default:
 					player.Points += earnedPoints
-					player.GamerTag = item.GamerTag // Actualizar tag por si varía mayúsculas
+					player.GamerTag = item.GamerTag
 					if err := tx.Save(&player).Error; err != nil {
 						return err
 					}
 				}
+
+				// 🆕 guardar los puntos de ESTE torneo
+				if err := recordResult(tx, syntheticID, t.EventID, earnedPoints); err != nil {
+					return err
+				}
 			}
 
-			// Registrar el evento como procesado para no duplicar puntos
 			return tx.Create(&ProcessedEvent{
 				EventID: t.EventID,
 				Slug:    t.Slug,
@@ -119,7 +119,6 @@ func SyncManualTournaments(db *gorm.DB) {
 	}
 }
 
-// Genera un ID entero único constante basado en el GamerTag para jugadores manuales
 func hashGamerTag(s string) int {
 	h := 0
 	for _, c := range strings.ToLower(s) {

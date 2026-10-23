@@ -29,7 +29,7 @@ func InitDatabase() {
 		log.Fatal("❌ Error al conectar a la base de datos:", err)
 	}
 
-	db.AutoMigrate(&models.Player{}, &startgg.ProcessedEvent{}, &models.PlayerResult{})
+	db.AutoMigrate(&models.Player{}, &startgg.ProcessedEvent{}, &models.PlayerResult{}) // 🆕 PlayerResult
 	fmt.Println("✅ Base de datos conectada y migrada correctamente.")
 }
 
@@ -40,29 +40,28 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	from, errFrom := strconv.Atoi(r.URL.Query().Get("from"))
 	to, errTo := strconv.Atoi(r.URL.Query().Get("to"))
 
-	// ¿Ya hay resultados por torneo guardados?
+	// Si todavía no hay resultados por torneo, se usa el ranking global
 	var resultsCount int64
 	db.Model(&models.PlayerResult{}).Where("league = ?", league).Count(&resultsCount)
-
 	useRange := errFrom == nil && errTo == nil && resultsCount > 0
 
-	players := []models.Player{} // así el JSON sale [] y no null
+	players := []models.Player{}
 	var err error
 
 	if useRange {
 		err = db.Raw(`
-		SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url,
-		       SUM(pr.points) AS points
-		FROM players p
-		JOIN player_results pr
-		  ON pr.player_id = p.id AND pr.league = p.league
-		JOIN (
-		  SELECT event_id, ROW_NUMBER() OVER (ORDER BY event_id) AS tournament_number
-		  FROM processed_events
-		) pe ON pe.event_id = pr.event_id
-		WHERE p.league = ? AND pe.tournament_number BETWEEN ? AND ?
-		GROUP BY p.id, p.league
-		ORDER BY points DESC`,
+			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url,
+			       SUM(pr.points)::bigint AS points
+			FROM players p
+			JOIN player_results pr
+			  ON pr.player_id = p.id AND pr.league = p.league
+			JOIN (
+			  SELECT event_id, ROW_NUMBER() OVER (ORDER BY event_id) AS tournament_number
+			  FROM processed_events
+			) pe ON pe.event_id = pr.event_id
+			WHERE p.league = ? AND pe.tournament_number BETWEEN ? AND ?
+			GROUP BY p.id, p.league
+			ORDER BY points DESC`,
 			league, from, to).Scan(&players).Error
 	} else {
 		err = db.Where("league = ?", league).Order("points DESC").Find(&players).Error
@@ -77,20 +76,13 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 		players[i].Ranking = i + 1
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(players)
 }
 
 func runFullSync(jsonFile, startGGToken string, db *gorm.DB) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
-
-	// 1. Sincronizar torneos automáticos de Start.gg
 	startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
-
-	// 2. Indexar torneos manuales (Hot Coffee #1 y #2)
 	startgg.SyncManualTournaments(db)
-
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
 
@@ -102,9 +94,7 @@ func main() {
 	jsonFile := "Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json"
 
 	if startGGToken != "" {
-		go func() {
-			runFullSync(jsonFile, startGGToken, db)
-		}()
+		go runFullSync(jsonFile, startGGToken, db)
 	} else {
 		log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el .env")
 	}
@@ -113,6 +103,7 @@ func main() {
 		HandleGetRankings(w, r, "2xko_online")
 	})
 
+	// 🆕 total de torneos, para el máximo del range picker
 	http.HandleFunc("/api/tournaments/count", func(w http.ResponseWriter, r *http.Request) {
 		var n int64
 		db.Table("processed_events").Count(&n)
