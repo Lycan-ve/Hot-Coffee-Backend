@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"smash-backend/internal/models"
 	"smash-backend/internal/startgg"
@@ -33,30 +34,37 @@ func InitDatabase() {
 }
 
 func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
-	// 1. Capturar los parámetros 'from' y 'to' del Range Picker enviado por el frontend
-	fromQuery := r.URL.Query().Get("from")
-	toQuery := r.URL.Query().Get("to")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	from, errFrom := strconv.Atoi(r.URL.Query().Get("from"))
+	to, errTo := strconv.Atoi(r.URL.Query().Get("to"))
 
 	var players []models.Player
+	var err error
 
-	// 2. Dependiendo de cómo tengas estructurada tu base de datos:
-	// Si tienes una tabla de resultados por torneo (ej. tournament_results o similar):
-	if fromQuery != "" && toQuery != "" {
-		// Ejemplo de consulta agrupando y sumando puntos en un rango de torneos/eventos
-		// (Ajusta los nombres de las tablas y campos según tu modelo real en Go)
-		db.Table("players").
-			Select("players.*, SUM(results.points) as points").
-			Joins("JOIN results ON results.player_id = players.id").
-			Where("players.league = ? AND results.tournament_index BETWEEN ? AND ?", league, fromQuery, toQuery).
+	if errFrom == nil && errTo == nil {
+		// Ranking de un rango: sumar solo los puntos de esos torneos
+		err = db.Table("players").
+			Select(`players.id, players.gamer_tag, players.sponsor,
+			        players.character, players.avatar_url,
+			        SUM(tournament_records.points) AS points`).
+			Joins("JOIN tournament_records ON tournament_records.player_id = players.id").
+			Where("players.league = ? AND tournament_records.tournament_number BETWEEN ? AND ?",
+				league, from, to).
 			Group("players.id").
 			Order("points DESC").
-			Find(&players)
+			Scan(&players).Error
 	} else {
-		// Si no se envían rangos, muestra el ranking global acumulado normal
-		db.Where("league = ?", league).Order("points DESC").Find(&players)
+		// Sin rango: ranking global como antes
+		err = db.Where("league = ?", league).Order("points DESC").Find(&players).Error
 	}
 
-	// Asignar la posición numérica (Ranking 1, 2, 3...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	for i := range players {
 		players[i].Ranking = i + 1
 	}
