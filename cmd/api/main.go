@@ -40,24 +40,29 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	from, errFrom := strconv.Atoi(r.URL.Query().Get("from"))
 	to, errTo := strconv.Atoi(r.URL.Query().Get("to"))
 
-	var players []models.Player
+	// ¿Ya hay resultados por torneo guardados?
+	var resultsCount int64
+	db.Model(&models.PlayerResult{}).Where("league = ?", league).Count(&resultsCount)
+
+	useRange := errFrom == nil && errTo == nil && resultsCount > 0
+
+	players := []models.Player{} // así el JSON sale [] y no null
 	var err error
 
-	if errFrom == nil && errTo == nil {
+	if useRange {
 		err = db.Table("players").
 			Select(`players.id, players.league, players.gamer_tag, players.sponsor,
-		        players.character, players.avatar_url,
-		        SUM(player_results.points) AS points`).
+			        players.character, players.avatar_url,
+			        SUM(player_results.points) AS points`).
 			Joins(`JOIN player_results
-		       ON player_results.player_id = players.id
-		       AND player_results.league = players.league`).
+			       ON player_results.player_id = players.id
+			       AND player_results.league = players.league`).
 			Where("players.league = ? AND player_results.tournament_number BETWEEN ? AND ?",
 				league, from, to).
 			Group("players.id, players.league").
 			Order("points DESC").
 			Scan(&players).Error
 	} else {
-		// Sin rango: ranking global como antes
 		err = db.Where("league = ?", league).Order("points DESC").Find(&players).Error
 	}
 
