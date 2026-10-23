@@ -50,7 +50,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 
 	if useRange {
 		err = db.Raw(`
-			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url,
+			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url, p.profile_url,
 			       SUM(pr.points)::bigint AS points
 			FROM players p
 			JOIN player_results pr
@@ -60,7 +60,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 			  FROM processed_events
 			) pe ON pe.event_id = pr.event_id
 			WHERE p.league = ? AND pe.tournament_number BETWEEN ? AND ?
-			GROUP BY p.id, p.league
+			GROUP BY p.id, p.league, p.profile_url
 			ORDER BY points DESC`,
 			league, from, to).Scan(&players).Error
 	} else {

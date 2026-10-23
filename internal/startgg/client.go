@@ -94,6 +94,7 @@ type standingNode struct {
 			Player struct {
 				ID   int `json:"id"`
 				User struct {
+					Slug   string `json:"slug"` // 🆕 Slug del usuario en start.gg
 					Images []struct {
 						Type string `json:"type"`
 						URL  string `json:"url"`
@@ -139,7 +140,10 @@ query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
           participants {
             player {
               id
-              user { images { type url } }
+              user {
+                slug # 🆕 Solicitamos el slug del usuario
+                images { type url }
+              }
             }
           }
         }
@@ -345,6 +349,7 @@ func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.D
 
 // 🆕 firma nueva: recibe eventID
 func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
+
 	for _, node := range nodes {
 		earnedPoints := calculatePoints(node.Placement)
 		if earnedPoints == 0 {
@@ -380,6 +385,17 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 			}
 
 			avatarURL := ""
+
+			profileURL := ""
+			if participant.Player.User.Slug != "" {
+				slug := participant.Player.User.Slug
+				if strings.HasPrefix(slug, "user/") {
+					profileURL = "https://www.start.gg/" + slug
+				} else {
+					profileURL = "https://www.start.gg/user/" + slug
+				}
+			}
+
 			for _, img := range participant.Player.User.Images {
 				if img.Type == "profile" {
 					avatarURL = img.URL
@@ -395,13 +411,14 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 			switch {
 			case errors.Is(err, gorm.ErrRecordNotFound):
 				player = models.Player{
-					ID:        playerID,
-					League:    leagueType,
-					GamerTag:  gamerTag,
-					Sponsor:   sponsor,
-					Character: "2XKO_FIGHTER",
-					AvatarURL: avatarURL,
-					Points:    earnedPoints,
+					ID:         playerID,
+					League:     leagueType,
+					GamerTag:   gamerTag,
+					Sponsor:    sponsor,
+					Character:  "2XKO_FIGHTER",
+					AvatarURL:  avatarURL,
+					ProfileURL: profileURL, // 🆕
+					Points:     earnedPoints,
 				}
 				if err := tx.Create(&player).Error; err != nil {
 					return err
@@ -410,13 +427,16 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 				return err
 			default:
 				player.Points += earnedPoints
-				if !merged { // 🆕 la cuenta duplicada no pisa el tag/avatar de la real
+				if !merged {
 					player.GamerTag = gamerTag
 					if sponsor != "" {
 						player.Sponsor = sponsor
 					}
 					if avatarURL != "" {
 						player.AvatarURL = avatarURL
+					}
+					if profileURL != "" { // 🆕
+						player.ProfileURL = profileURL
 					}
 				}
 				if err := tx.Save(&player).Error; err != nil {
