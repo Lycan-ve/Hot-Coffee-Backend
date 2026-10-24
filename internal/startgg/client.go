@@ -347,6 +347,62 @@ func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.D
 	log.Printf("✅ Sincronización completa con los torneos de Discord.\n")
 }
 
+// SyncTournamentsFromDiscordLive procesa los torneos obtenidos dinámicamente vía discordgo
+func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken string, db *gorm.DB) {
+	log.Printf("🔍 Procesando %d torneos únicos obtenidos desde Discord.\n", len(tournaments))
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	for _, t := range tournaments {
+		log.Printf("📥 Procesando torneo Start.gg [Slug: %s]\n", t.Slug)
+
+		var tr tournamentEventsResp
+		if err := gqlDo(client, apiToken, eventsQuery, map[string]interface{}{"slug": t.Slug}, &tr); err != nil {
+			log.Printf("❌ [%s] no se pudo obtener la lista de eventos: %v\n", t.Slug, err)
+			continue
+		}
+		if tr.Tournament == nil {
+			log.Printf("⚠️  [%s] el torneo no existe o no es accesible\n", t.Slug)
+			continue
+		}
+		log.Printf("   ↳ %d eventos encontrados en %s\n", len(tr.Tournament.Events), t.Slug)
+
+		for _, ev := range tr.Tournament.Events {
+			vgName := strings.ToLower(ev.Videogame.Name)
+			if strings.Contains(vgName, "street fighter") || strings.Contains(vgName, "sf6") {
+				log.Printf("   ⏭️  Evento %d (%s) omitido: %s\n", ev.ID, ev.Name, ev.Videogame.Name)
+				continue
+			}
+
+			var already int64
+			db.Model(&ProcessedEvent{}).Where("event_id = ?", ev.ID).Count(&already)
+			if already > 0 {
+				log.Printf("   ⏭️  Evento %d (%s) ya procesado\n", ev.ID, ev.Name)
+				continue
+			}
+
+			nodes, err := fetchAllStandings(client, apiToken, ev.ID)
+			if err != nil {
+				log.Printf("   ❌ Evento %d (%s): %v\n", ev.ID, ev.Name, err)
+				continue
+			}
+
+			err = db.Transaction(func(tx *gorm.DB) error {
+				if err := applyStandings(tx, ev.ID, nodes); err != nil {
+					return err
+				}
+				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name}).Error
+			})
+			if err != nil {
+				log.Printf("   ❌ Evento %d (%s): error al guardar: %v\n", ev.ID, ev.Name, err)
+				continue
+			}
+			log.Printf("   ✅ Evento %d (%s): %d participantes\n", ev.ID, ev.Name, len(nodes))
+		}
+	}
+	log.Printf("✅ Sincronización en vivo con Discord finalizada.\n")
+}
+
 // 🆕 firma nueva: recibe eventID
 func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 

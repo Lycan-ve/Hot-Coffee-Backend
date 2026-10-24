@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 
+	"smash-backend/internal/discord"
 	"smash-backend/internal/models"
 	"smash-backend/internal/startgg"
 
@@ -79,11 +80,19 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	json.NewEncoder(w).Encode(players)
 }
 
-func runFullSync(jsonFile, startGGToken string, db *gorm.DB) {
+func runFullSync(startGGToken string, db *gorm.DB) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
-	startgg.CleanupDuplicatePlayers(db) // 🆕
-	startgg.SyncTournamentsFromDiscordJSON(jsonFile, startGGToken, db)
+	startgg.CleanupDuplicatePlayers(db)
+
+	// 1. Obtener torneos en vivo desde el canal de Discord configurado
+	discordTournaments := discord.FetchTournamentsFromDiscord()
+	if len(discordTournaments) > 0 {
+		startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db)
+	}
+
+	// 2. Procesar torneos manuales definidos en código
 	startgg.SyncManualTournaments(db)
+
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
 
@@ -92,10 +101,9 @@ func main() {
 	InitDatabase()
 
 	startGGToken := os.Getenv("STARTGG_TOKEN")
-	jsonFile := "Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json"
 
 	if startGGToken != "" {
-		go runFullSync(jsonFile, startGGToken, db)
+		go runFullSync(startGGToken, db)
 	} else {
 		log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el .env")
 	}
@@ -104,7 +112,6 @@ func main() {
 		HandleGetRankings(w, r, "2xko_online")
 	})
 
-	// 🆕 total de torneos, para el máximo del range picker
 	http.HandleFunc("/api/tournaments/count", func(w http.ResponseWriter, r *http.Request) {
 		var n int64
 		db.Table("processed_events").Count(&n)
@@ -115,11 +122,11 @@ func main() {
 
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 		if startGGToken != "" {
-			go runFullSync(jsonFile, startGGToken, db)
+			go runFullSync(startGGToken, db)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Write([]byte(`{"status": "success", "message": "Sincronización de torneos iniciada."}`))
+		w.Write([]byte(`{"status": "success", "message": "Sincronización de torneos desde Discord iniciada."}`))
 	})
 
 	port := ":8080"
