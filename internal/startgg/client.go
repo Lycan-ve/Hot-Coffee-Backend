@@ -87,12 +87,6 @@ type tournamentEventsResp struct {
 	} `json:"tournament"`
 }
 
-type externalAccount struct {
-	Type             string `json:"type"`
-	ExternalUsername string `json:"externalUsername"`
-	Identifier       string `json:"identifier"`
-}
-
 type standingNode struct {
 	Placement int `json:"placement"`
 	Entrant   struct {
@@ -106,7 +100,6 @@ type standingNode struct {
 						Type string `json:"type"`
 						URL  string `json:"url"`
 					} `json:"images"`
-					ExternalAccounts []externalAccount `json:"externalAccounts"` // 🆕
 				} `json:"user"`
 			} `json:"player"`
 		} `json:"participants"`
@@ -152,11 +145,6 @@ query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
               user {
                 slug
                 images { type url }
-                externalAccounts {
-                  type
-                  externalUsername
-                  identifier
-                }
               }
             }
           }
