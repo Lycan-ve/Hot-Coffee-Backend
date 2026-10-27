@@ -105,17 +105,17 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 	p1ID := ensurePlayerExists(db, author.ID, author.Username)
 	p2ID := ensurePlayerExists(db, rivalUser.ID, rivalUser.Username)
 
-	pointsAtStake := targetFT * 5 // Ejemplo: FT 3 = 15 puntos
-
 	match := models.Matchmaking{
-		League:        "2xko_online",
-		Player1ID:     p1ID,
-		Player1Tag:    author.Username,
-		Player2ID:     p2ID,
-		Player2Tag:    rivalUser.Username,
-		TargetFT:      targetFT,
-		PointsAtStake: pointsAtStake,
-		Status:        "PENDING",
+		League:           "2xko_online",
+		Player1ID:        p1ID,
+		Player1DiscordID: author.ID, // 👈 Guardar ID Snowflake real
+		Player1Tag:       author.Username,
+		Player2ID:        p2ID,
+		Player2DiscordID: rivalUser.ID, // 👈 Guardar ID Snowflake real
+		Player2Tag:       rivalUser.Username,
+		TargetFT:         targetFT,
+		PointsAtStake:    targetFT * 5,
+		Status:           "PENDING",
 	}
 	db.Create(&match)
 
@@ -132,7 +132,7 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 	}
 
 	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos en juego: **%d pts**\n\n¿Aceptas el desafío?",
-		targetFT, author.Username, pointsAtStake)
+		targetFT, author.Username, match.PointsAtStake)
 
 	keyboard := discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
@@ -177,18 +177,17 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB) {
 	customID := i.MessageComponentData().CustomID
 
+	// 1. Obtener ID de usuario de forma segura (DM o Servidor)
 	var userIdStr string
-	if i.Member != nil && i.Member.User != nil {
-		userIdStr = i.Member.User.ID
-	} else if i.User != nil {
+	if i.User != nil {
 		userIdStr = i.User.ID
+	} else if i.Member != nil && i.Member.User != nil {
+		userIdStr = i.Member.User.ID
 	}
 
+	// 2. Declarar userHash aquí para que esté disponible en todo el switch/if
 	userHash := hashUserID(userIdStr)
 
-	// ----------------------------------------------------
-	// 1. ACEPTAR RETA (DM -> Crear Hilo Público)
-	// ----------------------------------------------------
 	if strings.HasPrefix(customID, "ft_accept_") {
 		parts := strings.Split(customID, "_")
 		matchID := parts[2]
@@ -207,7 +206,8 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			return
 		}
 
-		if userHash != match.Player2ID {
+		// 🎯 VALIDACIÓN EXACTA: Comparación directa de cadenas Snowflake de Discord
+		if userIdStr != match.Player2DiscordID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
