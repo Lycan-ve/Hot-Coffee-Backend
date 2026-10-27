@@ -19,18 +19,26 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// Variable global de la base de datos (instancia GORM)
 var db *gorm.DB
 
+// InitDatabase conecta a PostgreSQL utilizando la variable DATABASE_URL
+// y ejecuta la migración automática de los modelos del sistema.
 func InitDatabase() {
 	dsn := os.Getenv("DATABASE_URL")
 	var err error
 	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
+		Logger: logger.Default.LogMode(logger.Silent), // Silencia logs innecesarios de SQL
 	})
 	if err != nil {
 		log.Fatal("❌ Error al conectar a la base de datos:", err)
 	}
 
+	// AutoMigrate crea o actualiza las tablas necesarias en PostgreSQL:
+	// - Players: Perfiles de jugadores y puntos globales
+	// - ProcessedEvents: Historial de eventos de Start.gg procesados
+	// - PlayerResults: Resultados puntuales de cada jugador por evento
+	// - Matchmaking: Registro de las retas/desafíos FT (puntos, estados, marcadores)
 	db.AutoMigrate(
 		&models.Player{},
 		&startgg.ProcessedEvent{},
@@ -40,9 +48,11 @@ func InitDatabase() {
 	fmt.Println("✅ Base de datos conectada y migrada correctamente.")
 }
 
+// HandleGetRankings es el manejador HTTP para la API de Rankings (/api/rankings/2xko)
+// Permite filtrar por rango de torneos (parámetros 'from' y 'to') o devolver la tabla general.
 func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "*") // Habilita CORS para el Frontend
 
 	from, errFrom := strconv.Atoi(r.URL.Query().Get("from"))
 	to, errTo := strconv.Atoi(r.URL.Query().Get("to"))
@@ -54,6 +64,8 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	players := []models.Player{}
 	var err error
 
+	// Si se proporcionan los parámetros 'from' y 'to', calcula los puntos dinámicamente sumando solo
+	// los resultados obtenidos dentro de ese rango de torneos procesados.
 	if useRange {
 		err = db.Raw(`
 			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url, p.profile_url,
@@ -70,6 +82,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 			ORDER BY points DESC`,
 			league, from, to).Scan(&players).Error
 	} else {
+		// De lo contrario, consulta la tabla directamente ordenada por puntos acumulados totales.
 		err = db.Where("league = ?", league).Order("points DESC").Find(&players).Error
 	}
 
@@ -78,6 +91,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 		return
 	}
 
+	// Asigna la posición de ranking (1, 2, 3...) a cada jugador según el orden de la consulta
 	for i := range players {
 		players[i].Ranking = i + 1
 	}
@@ -85,24 +99,33 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	json.NewEncoder(w).Encode(players)
 }
 
+// runFullSync ejecuta el proceso completo de sincronización de torneos de Start.gg
 func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
+
+	// 1. Limpia perfiles o etiquetas duplicadas en la base de datos
 	startgg.CleanupDuplicatePlayers(db)
 
+	// 2. Lee los enlaces/slugs de Start.gg publicados en el canal de calendario de Discord
 	discordTournaments, _ := discord.FetchTournamentsFromDiscord()
 
 	if len(discordTournaments) > 0 && dgSession != nil {
+		// 3. Obtiene los miembros activos del servidor de Discord para validar que solo se dé puntos
+		// a quienes estén dentro del servidor.
 		guildID := os.Getenv("DISCORD_GUILD_ID")
 		activeMembers := discord.GetGuildMembersMap(dgSession, guildID)
 
+		// 4. Procesa y guarda los resultados de Start.gg filtrando por estado COMPLETED y miembros válidos.
 		startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembers)
 	}
 
+	// 5. Ejecuta torneos configurados de forma manual (id > 900000)
 	startgg.SyncManualTournaments(db)
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
 
 func main() {
+	// Carga las variables del archivo .env si se ejecuta localmente
 	godotenv.Load()
 	InitDatabase()
 
@@ -122,22 +145,22 @@ func main() {
 		log.Fatalf("❌ Error al crear la sesión de Discord: %v", err)
 	}
 
-	// Configurar intents necesarios
+	// Configuración de Intents requeridos por Discord (Guilds, Mensajes y Miembros)
 	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers
 
-	// Registrar manejadores de Matchmaking (botones y comandos)
+	// Registrar manejadores de eventos (escuchadores de clics de botones y slash commands)
 	discord.RegisterMatchmakingHandlers(dg, db)
 
-	// Abrir la conexión WebSocket (pone al bot en línea)
+	// Abre el WebSocket en vivo con los servidores de Discord (Pone al bot EN LÍNEA)
 	err = dg.Open()
 	if err != nil {
 		log.Fatalf("❌ Error al conectar el bot con Discord: %v", err)
 	}
-	defer dg.Close()
+	defer dg.Close() // Garantiza que la conexión se cierre al apagar la aplicación
 
 	log.Printf("🤖 ¡Bot de Discord conectado y en línea exitosamente!")
 
-	// Registrar el comando de barra /ft de forma instantánea en tu servidor (Guild Command)
+	// Construcción del comando de barra /ft con sus opciones (objetivo y rival)
 	cmd := &discordgo.ApplicationCommand{
 		Name:        "ft",
 		Description: "Inicia un matchmaking FT (3, 5, 7, 10) contra un rival",
@@ -163,6 +186,7 @@ func main() {
 		},
 	}
 
+	// Registra el comando directamente en tu servidor (Guild Command) para disponibilidad instantánea.
 	if guildID != "" {
 		dg.ApplicationCommandCreate(dg.State.User.ID, guildID, cmd)
 		log.Printf("📌 Comando /ft registrado instantáneamente para el servidor: %s", guildID)
@@ -171,7 +195,7 @@ func main() {
 		log.Println("⚠️ DISCORD_GUILD_ID no configurado; el comando /ft se registró globalmente (puede tardar en aparecer).")
 	}
 
-	// Ejecutar la sincronización inicial de Start.gg pasando la sesión activa del bot
+	// Ejecuta la sincronización de Start.gg al iniciar en una rutina asíncrona (goroutine)
 	if startGGToken != "" {
 		go runFullSync(startGGToken, db, dg)
 	} else {
@@ -179,12 +203,15 @@ func main() {
 	}
 
 	// ==========================================
-	// SERVIDOR HTTP
+	// RUTAS HTTP (API REST)
 	// ==========================================
+
+	// GET /api/rankings/2xko -> Retorna la tabla de posiciones en formato JSON
 	http.HandleFunc("/api/rankings/2xko", func(w http.ResponseWriter, r *http.Request) {
 		HandleGetRankings(w, r, "2xko_online")
 	})
 
+	// GET /api/tournaments/count -> Retorna el total de eventos procesados en la base de datos
 	http.HandleFunc("/api/tournaments/count", func(w http.ResponseWriter, r *http.Request) {
 		var n int64
 		db.Table("processed_events").Count(&n)
@@ -193,6 +220,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]int64{"count": n})
 	})
 
+	// GET /api/sync -> Permite disparar la sincronización manualmente llamando al endpoint HTTP
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 		if startGGToken != "" {
 			go runFullSync(startGGToken, db, dg)
@@ -202,6 +230,7 @@ func main() {
 		w.Write([]byte(`{"status": "success", "message": "Sincronización de torneos desde Discord iniciada."}`))
 	})
 
+	// Inicia el servidor HTTP web en el puerto 8080
 	port := ":8080"
 	fmt.Printf("🚀 Servidor corriendo en http://localhost%s\n", port)
 	log.Fatal(http.ListenAndServe(port, nil))

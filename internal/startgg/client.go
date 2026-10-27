@@ -383,9 +383,32 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 				fmt.Sscanf(v, "%d", &stateInt)
 			}
 
-			// 🛑 REGLA ESTRICTA: El torneo/evento DEBE estar terminado (State == 3 en Start.gg)
-			if stateInt != 3 {
+			isCompleted := false
+			switch v := ev.State.(type) {
+			case float64:
+				if int(v) == 3 {
+					isCompleted = true
+				}
+			case int:
+				if v == 3 {
+					isCompleted = true
+				}
+			case string:
+				upperVal := strings.ToUpper(strings.TrimSpace(v))
+				if upperVal == "3" || upperVal == "COMPLETED" || upperVal == "COMPLETE" {
+					isCompleted = true
+				}
+			}
+
+			// 🛑 REGLA ESTRICTA: El torneo/evento DEBE estar terminado
+			if !isCompleted {
 				log.Printf("   ⏭️  Evento %d (%s) omitido: El torneo aún no ha finalizado (Estado actual: %v)\n", ev.ID, ev.Name, ev.State)
+				continue
+			}
+
+			vgName := strings.ToLower(ev.Videogame.Name)
+			if strings.Contains(vgName, "street fighter") || strings.Contains(vgName, "sf6") {
+				log.Printf("   ⏭️  Evento %d (%s) omitido por videojuego: %s\n", ev.ID, ev.Name, ev.Videogame.Name)
 				continue
 			}
 
@@ -403,6 +426,7 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 			}
 
 			err = db.Transaction(func(tx *gorm.DB) error {
+				// 🔍 Aquí se ejecuta applyStandings, que analiza a los usuarios y valida si están en activeMembers (Discord)
 				if err := applyStandings(tx, ev.ID, nodes, activeMembers); err != nil {
 					return err
 				}
@@ -412,7 +436,7 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 				log.Printf("   ❌ Evento %d (%s): error al guardar: %v\n", ev.ID, ev.Name, err)
 				continue
 			}
-			log.Printf("   ✅ Evento %d (%s) [FINALIZADO]: %d participantes procesados exitosamente.\n", ev.ID, ev.Name, len(nodes))
+			log.Printf("   ✅ Evento %d (%s) [COMPLETADO]: %d participantes procesados y validados con Discord.\n", ev.ID, ev.Name, len(nodes))
 		}
 	}
 	log.Printf("✅ Sincronización en vivo con Discord finalizada.\n")
