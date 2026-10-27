@@ -24,8 +24,7 @@ var manualDiscordIDs = map[int]string{
 // Torneos manuales: tag escrito a mano (en minúsculas) -> ID de Discord del jugador
 // Torneos manuales: tag escrito a mano (en minúsculas) -> ID de Discord del jugador
 var manualTagDiscordIDs = map[string]string{
-	"daigo masafumi": "714370722213920800",
-	"miyamura":       "TU_DISCORD_ID_DE_MIYAMURA", // <--- Agrégalo aquí
+	"daigo masafumi": "714370722213920800", // <--- Agrégalo aquí
 	// "gaskman": "123456789012345678",
 }
 
