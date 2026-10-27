@@ -117,7 +117,7 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 
 	// 2. Sincronizar utilizando el archivo JSON de Discord
 	// (Asegúrate de cambiar "discord_export.json" por el nombre real de tu archivo si es distinto)
-	startgg.SyncTournamentsFromDiscordJSON("discord_export.json", startGGToken, db, activeMembers)
+	startgg.SyncTournamentsFromDiscordJSON("Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json", startGGToken, db, activeMembers)
 
 	// // [COMENTADO] Sincronización en vivo desde Discord (deshabilitada temporalmente)
 	// discordTournaments, _ := discord.FetchTournamentsFromDiscord()
