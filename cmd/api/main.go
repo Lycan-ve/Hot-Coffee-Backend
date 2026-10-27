@@ -12,6 +12,7 @@ import (
 	"smash-backend/internal/models"
 	"smash-backend/internal/startgg"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -34,7 +35,7 @@ func InitDatabase() {
 		&models.Player{},
 		&startgg.ProcessedEvent{},
 		&models.PlayerResult{},
-		&models.Matchmaking{}, // 🆕 Añadido aquí
+		&models.Matchmaking{},
 	)
 	fmt.Println("✅ Base de datos conectada y migrada correctamente.")
 }
@@ -46,7 +47,6 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	from, errFrom := strconv.Atoi(r.URL.Query().Get("from"))
 	to, errTo := strconv.Atoi(r.URL.Query().Get("to"))
 
-	// Si todavía no hay resultados por torneo, se usa el ranking global
 	var resultsCount int64
 	db.Model(&models.PlayerResult{}).Where("league = ?", league).Count(&resultsCount)
 	useRange := errFrom == nil && errTo == nil && resultsCount > 0
@@ -85,15 +85,14 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	json.NewEncoder(w).Encode(players)
 }
 
-func runFullSync(startGGToken string, db *gorm.DB) {
+func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
 	startgg.CleanupDuplicatePlayers(db)
 
-	// Fetch de torneos y sesión activa de Discord
-	discordTournaments, dgSession := discord.FetchTournamentsFromDiscord()
+	discordTournaments, _ := discord.FetchTournamentsFromDiscord()
 
 	if len(discordTournaments) > 0 && dgSession != nil {
-		guildID := os.Getenv("DISCORD_GUILD_ID") // ID de tu servidor
+		guildID := os.Getenv("DISCORD_GUILD_ID")
 		activeMembers := discord.GetGuildMembersMap(dgSession, guildID)
 
 		startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembers)
@@ -108,13 +107,80 @@ func main() {
 	InitDatabase()
 
 	startGGToken := os.Getenv("STARTGG_TOKEN")
+	botToken := os.Getenv("DISCORD_BOT_TOKEN")
+	guildID := os.Getenv("DISCORD_GUILD_ID")
 
+	if botToken == "" {
+		log.Fatal("❌ DISCORD_BOT_TOKEN no está configurado en el .env")
+	}
+
+	// ==========================================
+	// 🚀 CONEXIÓN PERSISTENTE DEL BOT DE DISCORD
+	// ==========================================
+	dg, err := discordgo.New("Bot " + botToken)
+	if err != nil {
+		log.Fatalf("❌ Error al crear la sesión de Discord: %v", err)
+	}
+
+	// Configurar intents necesarios
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers
+
+	// Registrar manejadores de Matchmaking (botones y comandos)
+	discord.RegisterMatchmakingHandlers(dg, db)
+
+	// Abrir la conexión WebSocket (pone al bot en línea)
+	err = dg.Open()
+	if err != nil {
+		log.Fatalf("❌ Error al conectar el bot con Discord: %v", err)
+	}
+	defer dg.Close()
+
+	log.Printf("🤖 ¡Bot de Discord conectado y en línea exitosamente!")
+
+	// Registrar el comando de barra /ft de forma instantánea en tu servidor (Guild Command)
+	cmd := &discordgo.ApplicationCommand{
+		Name:        "ft",
+		Description: "Inicia un matchmaking FT (3, 5, 7, 10) contra un rival",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionInteger,
+				Name:        "objetivo",
+				Description: "Formato de la reta (3, 5, 7, 10)",
+				Required:    true,
+				Choices: []*discordgo.ApplicationCommandOptionChoice{
+					{Name: "FT 3", Value: 3},
+					{Name: "FT 5", Value: 5},
+					{Name: "FT 7", Value: 7},
+					{Name: "FT 10", Value: 10},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionUser,
+				Name:        "rival",
+				Description: "Usuario contra el que jugarás",
+				Required:    true,
+			},
+		},
+	}
+
+	if guildID != "" {
+		dg.ApplicationCommandCreate(dg.State.User.ID, guildID, cmd)
+		log.Printf("📌 Comando /ft registrado instantáneamente para el servidor: %s", guildID)
+	} else {
+		dg.ApplicationCommandCreate(dg.State.User.ID, "", cmd)
+		log.Println("⚠️ DISCORD_GUILD_ID no configurado; el comando /ft se registró globalmente (puede tardar en aparecer).")
+	}
+
+	// Ejecutar la sincronización inicial de Start.gg pasando la sesión activa del bot
 	if startGGToken != "" {
-		go runFullSync(startGGToken, db)
+		go runFullSync(startGGToken, db, dg)
 	} else {
 		log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el .env")
 	}
 
+	// ==========================================
+	// SERVIDOR HTTP
+	// ==========================================
 	http.HandleFunc("/api/rankings/2xko", func(w http.ResponseWriter, r *http.Request) {
 		HandleGetRankings(w, r, "2xko_online")
 	})
@@ -129,7 +195,7 @@ func main() {
 
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 		if startGGToken != "" {
-			go runFullSync(startGGToken, db)
+			go runFullSync(startGGToken, db, dg)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
