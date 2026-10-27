@@ -294,13 +294,10 @@ func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
 //
 // Devuelve (id, "") si es válido, o ("", motivo) si no.
 func resolveDiscordID(originalID, playerID int, auths []startggAuth, members map[string]string, storedID string) (string, string) {
-	// 1) Excepción manual
+	// 1) Excepción manual (Acepta el ID directamente sin validar members[id])
 	for _, key := range []int{originalID, playerID} {
 		if id, ok := manualDiscordIDs[key]; ok {
-			if _, inGuild := members[id]; inGuild {
-				return id, ""
-			}
-			return "", fmt.Sprintf("excepción manual: el ID de Discord %s no está en el servidor", id)
+			return id, ""
 		}
 	}
 
