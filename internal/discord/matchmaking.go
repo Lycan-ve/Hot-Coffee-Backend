@@ -39,17 +39,13 @@ func RegisterMatchmakingHandlers(s *discordgo.Session, db *gorm.DB) {
 	})
 }
 
-// Asegurar que el jugador exista en la BD (si es nuevo, lo registra con su ID de Discord)
 // ensurePlayerExists garantiza que el jugador exista en la base de datos buscando por su DiscordID real.
-// Devuelve el ID primario de la tabla 'players'.
 func ensurePlayerExists(db *gorm.DB, discordIDStr string, username string) int {
 	var player models.Player
 
-	// 1. Buscar en la BD usando la columna discord_id
 	err := db.First(&player, "discord_id = ? AND league = '2xko_online'", discordIDStr).Error
 
 	if errorsIsRecordNotFound(err) {
-		// CASO A: El usuario es completamente nuevo
 		playerID := hashUserID(discordIDStr)
 		player = models.Player{
 			ID:        playerID,
@@ -67,8 +63,6 @@ func ensurePlayerExists(db *gorm.DB, discordIDStr string, username string) int {
 		}
 		return playerID
 	} else if err == nil {
-		// CASO B: El jugador ya existía (por Start.gg o una Reta anterior)
-		// Si no tenía GamerTag o cambio de nombre de usuario en Discord, actualizamos la info
 		if player.GamerTag == "" || (player.GamerTag != username && player.ProfileURL == "") {
 			player.GamerTag = username
 			db.Model(&player).Update("gamer_tag", username)
@@ -76,7 +70,6 @@ func ensurePlayerExists(db *gorm.DB, discordIDStr string, username string) int {
 		return player.ID
 	}
 
-	// Respaldo en caso de error en la BD
 	return hashUserID(discordIDStr)
 }
 
@@ -101,17 +94,16 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		return
 	}
 
-	// Asegurar que ambos existan en la BD
 	p1ID := ensurePlayerExists(db, author.ID, author.Username)
 	p2ID := ensurePlayerExists(db, rivalUser.ID, rivalUser.Username)
 
 	match := models.Matchmaking{
 		League:           "2xko_online",
 		Player1ID:        p1ID,
-		Player1DiscordID: author.ID, // 👈 Guardar ID Snowflake real
+		Player1DiscordID: author.ID,
 		Player1Tag:       author.Username,
 		Player2ID:        p2ID,
-		Player2DiscordID: rivalUser.ID, // 👈 Guardar ID Snowflake real
+		Player2DiscordID: rivalUser.ID,
 		Player2Tag:       rivalUser.Username,
 		TargetFT:         targetFT,
 		PointsAtStake:    targetFT * 5,
@@ -177,7 +169,6 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB) {
 	customID := i.MessageComponentData().CustomID
 
-	// 1. Obtener ID de usuario de forma segura (DM o Servidor)
 	var userIdStr string
 	if i.User != nil {
 		userIdStr = i.User.ID
@@ -185,9 +176,9 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		userIdStr = i.Member.User.ID
 	}
 
-	// 2. Declarar userHash aquí para que esté disponible en todo el switch/if
-	userHash := hashUserID(userIdStr)
-
+	// ----------------------------------------------------
+	// 1. ACEPTAR RETA
+	// ----------------------------------------------------
 	if strings.HasPrefix(customID, "ft_accept_") {
 		parts := strings.Split(customID, "_")
 		matchID := parts[2]
@@ -206,7 +197,6 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			return
 		}
 
-		// 🎯 VALIDACIÓN EXACTA: Comparación directa de cadenas Snowflake de Discord
 		if userIdStr != match.Player2DiscordID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -221,9 +211,8 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		match.Status = "IN_PROGRESS"
 		matchmakingChannel := getMatchmakingChannelID()
 
-		// Mensaje base en canal público
-		p1DiscordID := getDiscordIDByHash(db, match.Player1ID)
-		p2DiscordID := getDiscordIDByHash(db, match.Player2ID)
+		p1DiscordID := match.Player1DiscordID
+		p2DiscordID := match.Player2DiscordID
 
 		baseMsg, err := s.ChannelMessageSend(
 			matchmakingChannel,
@@ -240,7 +229,6 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			return
 		}
 
-		// Crear hilo público
 		threadName := fmt.Sprintf("🥊 %s vs %s (FT %d)", match.Player1Tag, match.Player2Tag, match.TargetFT)
 		thread, err := s.MessageThreadStart(matchmakingChannel, baseMsg.ID, threadName, 1440)
 		if err != nil {
@@ -257,7 +245,6 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		match.ThreadID = thread.ID
 		db.Save(&match)
 
-		// Mensaje inicial dentro del hilo mencionando a los combatientes
 		roundContent := fmt.Sprintf("🎮 **¡MATCHMAKING INICIADO!**\n⚔️ <@%s> vs <@%s>\n💰 Puntos en juego: **%d pts**\n\n🔒 *Solo los combatientes pueden interactuar con este panel.*\n\n¿Quién ganó la **Ronda 1**?",
 			p1DiscordID, p2DiscordID, match.PointsAtStake)
 
@@ -291,7 +278,7 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		var match models.Matchmaking
 		db.First(&match, matchID)
 
-		if userHash != match.Player2ID {
+		if userIdStr != match.Player2DiscordID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{Content: "❌ Solo el jugador retado puede rechazar esta solicitud.", Flags: discordgo.MessageFlagsEphemeral},
@@ -311,7 +298,7 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		})
 
 		// ----------------------------------------------------
-		// 3. ANOTAR RONDA (Control Anti-Sabotaje)
+		// 3. ANOTAR RONDA (Control Anti-Sabotaje con Discord ID)
 		// ----------------------------------------------------
 	} else if strings.HasPrefix(customID, "ft_win_") {
 		parts := strings.Split(customID, "_")
@@ -321,8 +308,7 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		var match models.Matchmaking
 		db.First(&match, matchID)
 
-		// 🛑 FILTRO ANTI-SABOTAJE: Rechazar interacción si no es uno de los 2 combatientes
-		if userHash != match.Player1ID && userHash != match.Player2ID {
+		if userIdStr != match.Player1DiscordID && userIdStr != match.Player2DiscordID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
@@ -419,8 +405,7 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		var match models.Matchmaking
 		db.First(&match, matchID)
 
-		// 🛑 FILTRO ANTI-SABOTAJE
-		if userHash != match.Player1ID && userHash != match.Player2ID {
+		if userIdStr != match.Player1DiscordID && userIdStr != match.Player2DiscordID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
@@ -459,8 +444,7 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		var match models.Matchmaking
 		db.First(&match, matchID)
 
-		// 🛑 FILTRO ANTI-SABOTAJE
-		if userHash != match.Player1ID && userHash != match.Player2ID {
+		if userIdStr != match.Player1DiscordID && userIdStr != match.Player2DiscordID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
@@ -479,9 +463,9 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			return
 		}
 
-		if userHash == match.Player1ID {
+		if userIdStr == match.Player1DiscordID {
 			match.P1Confirmed = true
-		} else if userHash == match.Player2ID {
+		} else if userIdStr == match.Player2DiscordID {
 			match.P2Confirmed = true
 		}
 
@@ -557,26 +541,21 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 	}
 }
 
-// AJUSTE: Puntos del ganador completos y penalización de 5 pts al perdedor (mínimo de puntos = 5)
 func updatePlayerPointsCustom(db *gorm.DB, match models.Matchmaking) {
 	var pWinner, pLoser models.Player
 	db.First(&pWinner, "id = ?", match.WinnerID)
 	db.First(&pLoser, "id = ?", match.LoserID)
 
-	loserPenalty := 5     // Resta de puntos fija para el perdedor
-	minPointsAllowed := 5 // Puntaje mínimo permitido para cualquier jugador
+	loserPenalty := 5
+	minPointsAllowed := 5
 
-	// 1. Sumar puntos al ganador
 	if pWinner.ID != 0 {
 		pWinner.Points += match.PointsAtStake
 		db.Save(&pWinner)
 	}
 
-	// 2. Descontar puntos al perdedor asegurando el límite mínimo de 5 puntos
 	if pLoser.ID != 0 {
 		pLoser.Points -= loserPenalty
-
-		// Si el resultado cae por debajo del mínimo de 5 puntos, se fija en 5
 		if pLoser.Points < minPointsAllowed {
 			pLoser.Points = minPointsAllowed
 		}
@@ -584,7 +563,6 @@ func updatePlayerPointsCustom(db *gorm.DB, match models.Matchmaking) {
 	}
 }
 
-// Teclado con opción de "Corregir Marcador" durante las rondas
 func getRoundKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
 	return discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
@@ -607,19 +585,17 @@ func getRoundKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
 	}
 }
 
-// sendRankingNotification publica el reporte completo del FT en el canal de ranking
 func sendRankingNotification(s *discordgo.Session, match models.Matchmaking, oldRankW, newRankW, oldRankL, newRankL int) {
 	winnerTag := getWinnerTag(match)
 	loserTag := getLoserTag(match)
-	loserPenalty := 5 // Penalización fija para el perdedor
+	loserPenalty := 5
 
-	// Calcular diferencia de posiciones (Ascenso/Descenso)
 	winnerDiffStr := formatRankChange(oldRankW, newRankW)
 	loserDiffStr := formatRankChange(oldRankL, newRankL)
 
 	embed := &discordgo.MessageEmbed{
 		Title:       "📊 REPORTE DE MATCHMAKING & RANKING",
-		Color:       0x00FF00, // Verde brillante
+		Color:       0x00FF00,
 		Description: fmt.Sprintf("Se ha completado oficialmente el encuentro **FT %d** entre **%s** y **%s**.", match.TargetFT, match.Player1Tag, match.Player2Tag),
 		Fields: []*discordgo.MessageEmbedField{
 			{
@@ -652,7 +628,6 @@ func sendRankingNotification(s *discordgo.Session, match models.Matchmaking, old
 	s.ChannelMessageSendEmbed(getMatchmakingResultChannelID(), embed)
 }
 
-// Auxiliar para formatear de forma clara si un jugador subió, bajó o mantuvo su puesto
 func formatRankChange(oldRank, newRank int) string {
 	if oldRank > newRank {
 		return fmt.Sprintf("▲ Ascendió %d pos.", oldRank-newRank)
@@ -661,6 +636,7 @@ func formatRankChange(oldRank, newRank int) string {
 	}
 	return "➡️ Se mantiene"
 }
+
 func getPlayerRank(db *gorm.DB, playerID int) int {
 	var count int64
 	db.Raw(`
