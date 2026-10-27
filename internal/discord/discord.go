@@ -17,14 +17,18 @@ type DiscordUserMap map[string]string // Key: Tag en minúsculas, Value: Discord
 func GetGuildMembersMap(s *discordgo.Session, guildID string) DiscordUserMap {
 	membersMap := make(DiscordUserMap)
 
+	if guildID == "" || guildID == "members" {
+		log.Println("❌ Error: DISCORD_GUILD_ID no está configurado en las variables de entorno o es inválido.")
+		return membersMap
+	}
+
 	members, err := s.GuildMembers(guildID, "", 1000)
 	if err != nil {
-		log.Printf("❌ Error al obtener miembros del servidor: %v\n", err)
+		log.Printf("❌ Error al obtener miembros del servidor (GuildID: %s): %v\n", guildID, err)
 		return membersMap
 	}
 
 	for _, m := range members {
-		// Guardamos tanto el username como el GlobalName (Display Name)
 		membersMap[strings.ToLower(m.User.Username)] = m.User.ID
 		if m.User.GlobalName != "" {
 			membersMap[strings.ToLower(m.User.GlobalName)] = m.User.ID

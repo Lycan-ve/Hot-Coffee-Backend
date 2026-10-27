@@ -71,9 +71,9 @@ type gqlEnvelope struct {
 }
 
 type eventSummary struct {
-	ID        int    `json:"id"`
-	Name      string `json:"name"`
-	State     int    `json:"state"` // 🆕 Añadimos el estado del evento (3 = Finalizado)
+	ID        int         `json:"id"`
+	Name      string      `json:"name"`
+	State     interface{} `json:"state"` // 👈 Cambiado a interface{} para aceptar cualquier tipo que envíe Start.gg
 	Videogame struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
@@ -371,15 +371,21 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 		log.Printf("   ↳ %d eventos encontrados en %s\n", len(tr.Tournament.Events), t.Slug)
 
 		for _, ev := range tr.Tournament.Events {
-			// 🛑 REGLA ESTRICTA: El torneo/evento DEBE estar terminado (State == 3 en Start.gg)
-			if ev.State != 3 {
-				log.Printf("   ⏭️  Evento %d (%s) omitido: El torneo aún no ha finalizado (Estado actual: %d)\n", ev.ID, ev.Name, ev.State)
-				continue
+			// Convertir state de interface{} a int de forma segura
+			stateInt := 0
+			switch v := ev.State.(type) {
+			case float64:
+				stateInt = int(v)
+			case int:
+				stateInt = v
+			case string:
+				// Si por alguna razón viene como texto numérico
+				fmt.Sscanf(v, "%d", &stateInt)
 			}
 
-			vgName := strings.ToLower(ev.Videogame.Name)
-			if strings.Contains(vgName, "street fighter") || strings.Contains(vgName, "sf6") {
-				log.Printf("   ⏭️  Evento %d (%s) omitido por videojuego: %s\n", ev.ID, ev.Name, ev.Videogame.Name)
+			// 🛑 REGLA ESTRICTA: El torneo/evento DEBE estar terminado (State == 3 en Start.gg)
+			if stateInt != 3 {
+				log.Printf("   ⏭️  Evento %d (%s) omitido: El torneo aún no ha finalizado (Estado actual: %v)\n", ev.ID, ev.Name, ev.State)
 				continue
 			}
 
