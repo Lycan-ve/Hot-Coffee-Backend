@@ -9,12 +9,13 @@ type Matchmaking struct {
 	Player1Tag    string    `json:"player1_tag"`
 	Player2ID     int       `json:"player2_id"`
 	Player2Tag    string    `json:"player2_tag"`
-	TargetFT      int       `json:"target_ft"`       // 3, 5, 7, 10
-	Score1        int       `json:"score_1"`         // Rondas ganadas P1
-	Score2        int       `json:"score_2"`         // Rondas ganadas P2
-	PointsAtStake int       `json:"points_at_stake"` // Puntos apostados en la reta
-	Status        string    `json:"status"`          // "IN_PROGRESS", "FINISHED"
+	TargetFT      int       `json:"target_ft"`
+	Score1        int       `json:"score_1"`
+	Score2        int       `json:"score_2"`
+	PointsAtStake int       `json:"points_at_stake"`
+	Status        string    `json:"status"` // PENDING, IN_PROGRESS, REJECTED, FINISHED
 	WinnerID      int       `json:"winner_id"`
 	LoserID       int       `json:"loser_id"`
+	ThreadID      string    `json:"thread_id"` // ID del hilo creado en Discord
 	UpdatedAt     time.Time `json:"updated_at"`
 }

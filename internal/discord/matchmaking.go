@@ -11,7 +11,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// Constantes de Canales
 func getMatchmakingChannelID() string {
 	if id := os.Getenv("DISCORD_MATCHMAKING_CHANNEL_ID"); id != "" {
 		return id
@@ -38,9 +37,8 @@ func RegisterMatchmakingHandlers(s *discordgo.Session, db *gorm.DB) {
 	})
 }
 
+// 1. Comando /ft: Envía la invitación al privado (DM) del rival escogido
 func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB) {
-	matchmakingChannel := getMatchmakingChannelID()
-
 	options := i.ApplicationCommandData().Options
 	targetFT := int(options[0].IntValue())
 	rivalUser := options[1].UserValue(s)
@@ -57,7 +55,7 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		return
 	}
 
-	pointsAtStake := targetFT * 5 // 15, 25, 35, 50 puntos según el FT
+	pointsAtStake := targetFT * 5
 
 	match := models.Matchmaking{
 		League:        "2xko_online",
@@ -67,17 +65,30 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		Player2Tag:    rivalUser.Username,
 		TargetFT:      targetFT,
 		PointsAtStake: pointsAtStake,
-		Status:        "PENDING", // Pendiente de aceptación del rival
+		Status:        "PENDING",
 	}
 	db.Create(&match)
 
-	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **<@%s>** ha retado a **<@%s>**\n💰 Puntos en juego iniciales: **%d pts**\n\n¿<@%s>, aceptas el desafío?",
-		targetFT, author.ID, rivalUser.ID, pointsAtStake, rivalUser.ID)
+	// Crear canal de DM con el rival
+	dmChannel, err := s.UserChannelCreate(rivalUser.ID)
+	if err != nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ No se pudo enviar mensaje privado al rival. Asegúrate de que tenga los DMs abiertos.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos en juego: **%d pts**\n\n¿Aceptas el desafío?",
+		targetFT, author.Username, pointsAtStake)
 
 	keyboard := discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
 			discordgo.Button{
-				Label:    "✅ Aceptar Reta",
+				Label:    "✅ Aceptar",
 				Style:    discordgo.SuccessButton,
 				CustomID: fmt.Sprintf("ft_accept_%d", match.ID),
 			},
@@ -89,34 +100,45 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		},
 	}
 
-	if i.ChannelID != matchmakingChannel {
+	// Enviar invitación al DM del rival
+	_, err = s.ChannelMessageSendComplex(dmChannel.ID, &discordgo.MessageSend{
+		Content:    content,
+		Components: []discordgo.MessageComponent{keyboard},
+	})
+
+	if err != nil {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("✅ La solicitud de reta ha sido enviada al canal <#%s>.", matchmakingChannel),
+				Content: "❌ Error al enviar la invitación al privado del rival.",
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
-
-		s.ChannelMessageSendComplex(matchmakingChannel, &discordgo.MessageSend{
-			Content:    content,
-			Components: []discordgo.MessageComponent{keyboard},
-		})
-	} else {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content:    content,
-				Components: []discordgo.MessageComponent{keyboard},
-			},
-		})
+		return
 	}
+
+	// Responder al autor en el canal original de manera efímera/pública
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("✅ Invitación enviada al privado de **%s**. Esperando su respuesta...", rivalUser.Username),
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
 }
 
 func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB) {
 	customID := i.MessageComponentData().CustomID
-	userIdStr := i.Member.User.ID
 
+	// Obtener ID del usuario que interactúa de forma segura (funciona en DM y en Servidor)
+	var userIdStr string
+	if i.Member != nil && i.Member.User != nil {
+		userIdStr = i.Member.User.ID
+	} else if i.User != nil {
+		userIdStr = i.User.ID
+	}
+
+	// 2. ACEPTAR RETA
 	if strings.HasPrefix(customID, "ft_accept_") {
 		parts := strings.Split(customID, "_")
 		matchID := parts[2]
@@ -127,16 +149,22 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		if match.Status != "PENDING" {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{Content: "⚠️ Esta solicitud ya no está pendiente.", Flags: discordgo.MessageFlagsEphemeral},
+				Data: &discordgo.InteractionResponseData{
+					Content: "⚠️ Esta solicitud ya no está pendiente.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
 			})
 			return
 		}
 
-		// Validar que sea el rival quien acepte
+		// Validar que solo el rival desafiado sea quien pueda aceptar la reta
 		if hashUserID(userIdStr) != match.Player2ID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{Content: "❌ Solo el jugador retado puede aceptar la reta.", Flags: discordgo.MessageFlagsEphemeral},
+				Data: &discordgo.InteractionResponseData{
+					Content: "❌ Solo el jugador retado puede aceptar esta solicitud.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
 			})
 			return
 		}
@@ -144,32 +172,46 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		match.Status = "IN_PROGRESS"
 		db.Save(&match)
 
-		content := fmt.Sprintf("🎮 **NUEVO MATCHMAKING FT %d (Aceptado)**\n⚔️ **%s** vs **%s**\n💰 Puntos en juego: **%d pts**\n\n¿Quién ganó la **Ronda 1**?",
-			match.TargetFT, match.Player1Tag, match.Player2Tag, match.PointsAtStake)
+		// Crear un Hilo (Thread) público dentro del canal de matchmaking
+		matchmakingChannel := getMatchmakingChannelID()
+		threadName := fmt.Sprintf("⚔️ Reta: %s vs %s (FT %d)", match.Player1Tag, match.Player2Tag, match.TargetFT)
 
-		keyboard := discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.Button{
-					Label:    fmt.Sprintf("Gana %s", match.Player1Tag),
-					Style:    discordgo.PrimaryButton,
-					CustomID: fmt.Sprintf("ft_win_%d_p1", match.ID),
-				},
-				discordgo.Button{
-					Label:    fmt.Sprintf("Gana %s", match.Player2Tag),
-					Style:    discordgo.DangerButton,
-					CustomID: fmt.Sprintf("ft_win_%d_p2", match.ID),
-				},
-			},
+		// USO CORRECTO EN DISCORDGO: s.ThreadStart
+		thread, err := s.ThreadStart(
+			matchmakingChannel,
+			threadName,
+			discordgo.ChannelTypeGuildPublicThread,
+			1440, // Tiempo de auto-archivo en minutos (24 horas)
+		)
+
+		var threadMention string
+		if err == nil {
+			match.ThreadID = thread.ID
+			db.Save(&match)
+			threadMention = fmt.Sprintf("<#%s>", thread.ID)
+
+			// Publicar mensaje de inicio dentro del hilo creado
+			roundContent := fmt.Sprintf("🎮 **¡RETAS INICIADAS!**\n🥊 **%s** vs **%s**\n💰 Puntos en juego: **%d pts**\n\n¿Quién ganó la **Ronda 1**?",
+				match.Player1Tag, match.Player2Tag, match.PointsAtStake)
+
+			keyboard := getRoundKeyboard(match.ID, match.Player1Tag, match.Player2Tag)
+			s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
+				Content:    roundContent,
+				Components: []discordgo.MessageComponent{keyboard},
+			})
+		} else {
+			threadMention = fmt.Sprintf("<#%s>", matchmakingChannel)
 		}
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content:    content,
-				Components: []discordgo.MessageComponent{keyboard},
+				Content:    fmt.Sprintf("✅ ¡Has aceptado la reta! Se ha creado un hilo para el enfrentamiento: %s", threadMention),
+				Components: []discordgo.MessageComponent{},
 			},
 		})
 
+		// 3. RECHAZAR RETA
 	} else if strings.HasPrefix(customID, "ft_reject_") {
 		parts := strings.Split(customID, "_")
 		matchID := parts[2]
@@ -180,15 +222,22 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		if match.Status != "PENDING" {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{Content: "⚠️ Esta solicitud ya no está pendiente.", Flags: discordgo.MessageFlagsEphemeral},
+				Data: &discordgo.InteractionResponseData{
+					Content: "⚠️ Esta solicitud ya no está pendiente.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
 			})
 			return
 		}
 
+		// Validar que solo el rival desafiado sea quien pueda rechazar
 		if hashUserID(userIdStr) != match.Player2ID {
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{Content: "❌ Solo el jugador retado puede rechazar la reta.", Flags: discordgo.MessageFlagsEphemeral},
+				Data: &discordgo.InteractionResponseData{
+					Content: "❌ Solo el jugador retado puede rechazar esta solicitud.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
 			})
 			return
 		}
@@ -199,11 +248,12 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content:    fmt.Sprintf("❌ La reta entre **%s** y **%s** fue **rechazada**.", match.Player1Tag, match.Player2Tag),
+				Content:    "❌ Has rechazado la solicitud de reta.",
 				Components: []discordgo.MessageComponent{},
 			},
 		})
 
+		// 4. MANEJO DE RONDAS / VICTORIAS
 	} else if strings.HasPrefix(customID, "ft_win_") {
 		parts := strings.Split(customID, "_")
 		matchID := parts[2]
@@ -240,9 +290,9 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			maxWins = 6
 		}
 
-		// --- SI EL MATCHMAKING TERMINA ---
+		// --- SI TERMINA EL FT ---
 		if match.Score1 >= maxWins || match.Score2 >= maxWins {
-			match.Status = "FINISHED_PENDING_REMATCH"
+			match.Status = "PENDING_REMATCH"
 			if match.Score1 > match.Score2 {
 				match.WinnerID = match.Player1ID
 				match.LoserID = match.Player2ID
@@ -252,20 +302,18 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			}
 			db.Save(&match)
 
-			matchmakingReport := fmt.Sprintf("🏁 **MATCHMAKING FINALIZADO (FT %d)**\n🥊 **%s** (%d) vs (%d) **%s**\n🏆 Ganador: **%s**\n\n¿Desean solicitar **Revancha** con apuesta doble?",
-				match.TargetFT, match.Player1Tag, match.Score1, match.Score2, match.Player2Tag,
-				getWinnerTag(match),
-			)
+			report := fmt.Sprintf("🏁 **¡COMBATE FINALIZADO (FT %d)!**\n🥊 **%s** (%d) vs (%d) **%s**\n🏆 Ganador: **%s**\n\n¿Desean revancha con apuesta doble?",
+				match.TargetFT, match.Player1Tag, match.Score1, match.Score2, match.Player2Tag, getWinnerTag(match))
 
 			rematchKeyboard := discordgo.ActionsRow{
 				Components: []discordgo.MessageComponent{
 					discordgo.Button{
-						Label:    "✅ Sí (Revancha - Apuesta Doble)",
+						Label:    "🔄 Sí (Revancha - Apuesta Doble)",
 						Style:    discordgo.SuccessButton,
 						CustomID: fmt.Sprintf("ft_rematch_yes_%d", match.ID),
 					},
 					discordgo.Button{
-						Label:    "❌ No (Terminar y dar puntos)",
+						Label:    "🛑 No (Terminar y dar puntos)",
 						Style:    discordgo.DangerButton,
 						CustomID: fmt.Sprintf("ft_rematch_no_%d", match.ID),
 					},
@@ -275,7 +323,7 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseUpdateMessage,
 				Data: &discordgo.InteractionResponseData{
-					Content:    matchmakingReport,
+					Content:    report,
 					Components: []discordgo.MessageComponent{rematchKeyboard},
 				},
 			})
@@ -284,33 +332,18 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 
 		db.Save(&match)
 
-		nextRoundContent := fmt.Sprintf("🎮 **MATCHMAKING FT %d**\n🥊 **%s** (**%d**) vs (**%d**) **%s**\n\n¿Quién ganó la siguiente ronda?",
-			match.TargetFT, match.Player1Tag, match.Score1, match.Score2, match.Player2Tag,
-		)
-
-		keyboard := discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.Button{
-					Label:    fmt.Sprintf("Gana %s", match.Player1Tag),
-					Style:    discordgo.PrimaryButton,
-					CustomID: fmt.Sprintf("ft_win_%d_p1", match.ID),
-				},
-				discordgo.Button{
-					Label:    fmt.Sprintf("Gana %s", match.Player2Tag),
-					Style:    discordgo.DangerButton,
-					CustomID: fmt.Sprintf("ft_win_%d_p2", match.ID),
-				},
-			},
-		}
+		nextRoundContent := fmt.Sprintf("🎮 **MATCHMAKING FT %d**\n🥊 **%s** (**%d**) vs (**%d**) **%s**\n\n¿Quién gana la siguiente ronda?",
+			match.TargetFT, match.Player1Tag, match.Score1, match.Score2, match.Player2Tag)
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
 				Content:    nextRoundContent,
-				Components: []discordgo.MessageComponent{keyboard},
+				Components: []discordgo.MessageComponent{getRoundKeyboard(match.ID, match.Player1Tag, match.Player2Tag)},
 			},
 		})
 
+		// 5. REVANCHA: SÍ
 	} else if strings.HasPrefix(customID, "ft_rematch_yes_") {
 		parts := strings.Split(customID, "_")
 		matchID := parts[3]
@@ -320,37 +353,22 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 
 		match.Score1 = 0
 		match.Score2 = 0
-		match.PointsAtStake *= 2 // Apuesta doble
+		match.PointsAtStake *= 2
 		match.Status = "IN_PROGRESS"
 		db.Save(&match)
 
-		rematchContent := fmt.Sprintf("🔄 **¡REVANCHA INICIADA!**\n🔥 Puntos en juego apostados: **%d pts**\n\n🥊 **%s** vs **%s**\n¿Quién gana la **Ronda 1**?",
-			match.PointsAtStake, match.Player1Tag, match.Player2Tag,
-		)
-
-		keyboard := discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.Button{
-					Label:    fmt.Sprintf("Gana %s", match.Player1Tag),
-					Style:    discordgo.PrimaryButton,
-					CustomID: fmt.Sprintf("ft_win_%d_p1", match.ID),
-				},
-				discordgo.Button{
-					Label:    fmt.Sprintf("Gana %s", match.Player2Tag),
-					Style:    discordgo.DangerButton,
-					CustomID: fmt.Sprintf("ft_win_%d_p2", match.ID),
-				},
-			},
-		}
+		content := fmt.Sprintf("🔄 **¡REVANCHA INICIADA!**\n🔥 Puntos en juego: **%d pts**\n\n🥊 **%s** vs **%s**\n¿Quién gana la **Ronda 1**?",
+			match.PointsAtStake, match.Player1Tag, match.Player2Tag)
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content:    rematchContent,
-				Components: []discordgo.MessageComponent{keyboard},
+				Content:    content,
+				Components: []discordgo.MessageComponent{getRoundKeyboard(match.ID, match.Player1Tag, match.Player2Tag)},
 			},
 		})
 
+		// 6. REVANCHA: NO (Otorgar puntos y cerrar)
 	} else if strings.HasPrefix(customID, "ft_rematch_no_") {
 		parts := strings.Split(customID, "_")
 		matchID := parts[3]
@@ -361,47 +379,54 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		match.Status = "FINISHED"
 		db.Save(&match)
 
-		// 1. Obtener posiciones ANTES de actualizar
-		oldRankWinner := getPlayerRank(db, match.WinnerID)
-		oldRankLoser := getPlayerRank(db, match.LoserID)
+		oldRankW := getPlayerRank(db, match.WinnerID)
+		oldRankL := getPlayerRank(db, match.LoserID)
 
-		// 2. Transferir puntos
 		updatePlayerPoints(db, match)
 
-		// 3. Obtener posiciones DESPUÉS de actualizar
-		newRankWinner := getPlayerRank(db, match.WinnerID)
-		newRankLoser := getPlayerRank(db, match.LoserID)
+		newRankW := getPlayerRank(db, match.WinnerID)
+		newRankL := getPlayerRank(db, match.LoserID)
 
-		finalReport := fmt.Sprintf("🏁 **MATCHMAKING FINALIZADO (FT %d)**\n🥊 **%s** (%d) vs (%d) **%s**\n🏆 Ganador: **%s**\n\n*Los detalles del ranking se han publicado en <#%s>.*",
-			match.TargetFT, match.Player1Tag, match.Score1, match.Score2, match.Player2Tag,
-			getWinnerTag(match), getRankingChannelID(),
-		)
+		finalMsg := fmt.Sprintf("🏁 **MATCHMAKING CERRADO**\n🏆 Puntos entregados al ganador **%s** (+%d pts).\n*Reporte publicado en <#%s>.*",
+			getWinnerTag(match), match.PointsAtStake, getRankingChannelID())
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content:    finalReport,
+				Content:    finalMsg,
 				Components: []discordgo.MessageComponent{},
 			},
 		})
 
-		// Publicar Reporte Completo de Ranking
-		sendRankingNotification(s, match, oldRankWinner, newRankWinner, oldRankLoser, newRankLoser)
+		sendRankingNotification(s, match, oldRankW, newRankW, oldRankL, newRankL)
 	}
 }
 
-// Envío de Embed al canal de Ranking
+func getRoundKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
+	return discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.Button{
+				Label:    fmt.Sprintf("Gana %s", p1Tag),
+				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("ft_win_%d_p1", matchID),
+			},
+			discordgo.Button{
+				Label:    fmt.Sprintf("Gana %s", p2Tag),
+				Style:    discordgo.DangerButton,
+				CustomID: fmt.Sprintf("ft_win_%d_p2", matchID),
+			},
+		},
+	}
+}
+
 func sendRankingNotification(s *discordgo.Session, match models.Matchmaking, oldRankW, newRankW, oldRankL, newRankL int) {
 	winnerTag := getWinnerTag(match)
 	loserTag := getLoserTag(match)
 
-	winnerRankDiff := formatRankChange(oldRankW, newRankW)
-	loserRankDiff := formatRankChange(oldRankL, newRankL)
-
 	embed := &discordgo.MessageEmbed{
 		Title:       "📊 REPORTE DE MATCHMAKING & RANKING",
-		Color:       0x00ff00, // Verde
-		Description: fmt.Sprintf("Se ha completado el encuentro **FT %d** entre **%s** y **%s**.", match.TargetFT, match.Player1Tag, match.Player2Tag),
+		Color:       0x00ff00,
+		Description: fmt.Sprintf("Se completó el encuentro **FT %d** entre **%s** y **%s**.", match.TargetFT, match.Player1Tag, match.Player2Tag),
 		Fields: []*discordgo.MessageEmbedField{
 			{
 				Name:   "🥊 Marcador Final",
@@ -410,12 +435,12 @@ func sendRankingNotification(s *discordgo.Session, match models.Matchmaking, old
 			},
 			{
 				Name:   fmt.Sprintf("🏆 %s (Ganador)", winnerTag),
-				Value:  fmt.Sprintf("💰 **+%d Puntos**\n📈 Ranking: Posición **#%d** → **#%d** (%s)", match.PointsAtStake, oldRankW, newRankW, winnerRankDiff),
+				Value:  fmt.Sprintf("💰 **+%d Puntos**\n📈 Posición: **#%d** → **#%d**", match.PointsAtStake, oldRankW, newRankW),
 				Inline: true,
 			},
 			{
 				Name:   fmt.Sprintf("💀 %s (Perdedor)", loserTag),
-				Value:  fmt.Sprintf("📉 **-%d Puntos**\n📉 Ranking: Posición **#%d** → **#%d** (%s)", match.PointsAtStake, oldRankL, newRankL, loserRankDiff),
+				Value:  fmt.Sprintf("📉 **-%d Puntos**\n📉 Posición: **#%d** → **#%d**", match.PointsAtStake, oldRankL, newRankL),
 				Inline: true,
 			},
 		},
@@ -433,15 +458,6 @@ func getPlayerRank(db *gorm.DB, playerID int) int {
 			SELECT COALESCE(p2.points, 0) FROM players p2 WHERE p2.id = ? AND p2.league = '2xko_online'
 		)`, playerID).Scan(&count)
 	return int(count)
-}
-
-func formatRankChange(oldRank, newRank int) string {
-	if oldRank > newRank {
-		return fmt.Sprintf("▲ Ascendió %d pos", oldRank-newRank)
-	} else if oldRank < newRank {
-		return fmt.Sprintf("▼ Descendió %d pos", newRank-oldRank)
-	}
-	return "➡️ Se mantiene"
 }
 
 func updatePlayerPoints(db *gorm.DB, match models.Matchmaking) {
