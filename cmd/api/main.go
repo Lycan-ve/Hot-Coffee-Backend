@@ -103,23 +103,31 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
 
-	// // 1. Limpia perfiles o etiquetas duplicadas en la base de datos
-	// startgg.CleanupDuplicatePlayers(db)
+	// 1. Limpia perfiles o etiquetas duplicadas en la base de datos
+	startgg.CleanupDuplicatePlayers(db)
 
-	// // 2. Lee los enlaces/slugs de Start.gg publicados en el canal de calendario de Discord
+	// Obtener los miembros activos del servidor de Discord para la validación estricta
+	var activeMembers map[string]string
+	if dgSession != nil {
+		guildID := os.Getenv("DISCORD_GUILD_ID")
+		activeMembers = discord.GetGuildMembersMap(dgSession, guildID)
+	} else {
+		activeMembers = make(map[string]string)
+	}
+
+	// 2. Sincronizar utilizando el archivo JSON de Discord
+	// (Asegúrate de cambiar "discord_export.json" por el nombre real de tu archivo si es distinto)
+	startgg.SyncTournamentsFromDiscordJSON("discord_export.json", startGGToken, db, activeMembers)
+
+	// // [COMENTADO] Sincronización en vivo desde Discord (deshabilitada temporalmente)
 	// discordTournaments, _ := discord.FetchTournamentsFromDiscord()
-
 	// if len(discordTournaments) > 0 && dgSession != nil {
-	// 	// 3. Obtiene los miembros activos del servidor de Discord para validar que solo se dé puntos
-	// 	// a quienes estén dentro del servidor.
 	// 	guildID := os.Getenv("DISCORD_GUILD_ID")
-	// 	activeMembers := discord.GetGuildMembersMap(dgSession, guildID)
-
-	// 	// 4. Procesa y guarda los resultados de Start.gg filtrando por estado COMPLETED y miembros válidos.
-	// 	startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembers)
+	// 	activeMembersLive := discord.GetGuildMembersMap(dgSession, guildID)
+	// 	startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembersLive)
 	// }
 
-	// 5. Ejecuta torneos configurados de forma manual (id > 900000)
+	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
 	startgg.SyncManualTournaments(db)
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }

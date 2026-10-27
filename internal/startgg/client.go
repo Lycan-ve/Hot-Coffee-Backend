@@ -292,7 +292,7 @@ func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
 
 // ---------- Sincronización ----------
 
-func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.DB) {
+func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.DB, activeMembers map[string]string) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("❌ Error al abrir el archivo de Discord: %v\n", err)
