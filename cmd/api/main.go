@@ -38,13 +38,17 @@ func InitDatabase() {
 	// - Players: Perfiles de jugadores y puntos globales
 	// - ProcessedEvents: Historial de eventos de Start.gg procesados
 	// - PlayerResults: Resultados puntuales de cada jugador por evento
-	// - Matchmaking: Registro de las retas/desafíos FT (puntos, estados, marcadores)
-	db.AutoMigrate(
+	// - Matchmaking: Registro de las retas/desafíos FT (estados, marcadores)
+	// - MatchmakingPlayers: Ranking de MATCHMAKING (separado del ranking de torneos)
+	if err := db.AutoMigrate(
 		&models.Player{},
 		&startgg.ProcessedEvent{},
 		&models.PlayerResult{},
 		&models.Matchmaking{},
-	)
+		&models.MatchmakingPlayer{},
+	); err != nil {
+		log.Fatal("❌ Error en la migración automática:", err)
+	}
 	fmt.Println("✅ Base de datos conectada y migrada correctamente.")
 }
 
@@ -94,6 +98,30 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	// Asigna la posición de ranking (1, 2, 3...) a cada jugador según el orden de la consulta
 	for i := range players {
 		players[i].Ranking = i + 1
+	}
+
+	json.NewEncoder(w).Encode(players)
+}
+
+// HandleGetMatchmakingRankings es el manejador HTTP del ranking de MATCHMAKING (/api/rankings/matchmaking).
+// Es independiente del ranking de torneos: lee la tabla matchmaking_players, no players.
+func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	players := []models.MatchmakingPlayer{}
+	if err := db.Order("points DESC, wins DESC, username ASC").Find(&players).Error; err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Posición con empates: quienes tienen los mismos puntos comparten posición (1, 1, 3...)
+	for i := range players {
+		if i > 0 && players[i].Points == players[i-1].Points {
+			players[i].Ranking = players[i-1].Ranking
+		} else {
+			players[i].Ranking = i + 1
+		}
 	}
 
 	json.NewEncoder(w).Encode(players)
@@ -216,10 +244,13 @@ func main() {
 	// RUTAS HTTP (API REST)
 	// ==========================================
 
-	// GET /api/rankings/2xko -> Retorna la tabla de posiciones en formato JSON
+	// GET /api/rankings/2xko -> Retorna la tabla de posiciones de TORNEOS en formato JSON
 	http.HandleFunc("/api/rankings/2xko", func(w http.ResponseWriter, r *http.Request) {
 		HandleGetRankings(w, r, "2xko_online")
 	})
+
+	// GET /api/rankings/matchmaking -> Retorna la tabla de posiciones de MATCHMAKING (/ft)
+	http.HandleFunc("/api/rankings/matchmaking", HandleGetMatchmakingRankings)
 
 	// GET /api/tournaments/count -> Retorna el total de eventos procesados en la base de datos
 	http.HandleFunc("/api/tournaments/count", func(w http.ResponseWriter, r *http.Request) {
