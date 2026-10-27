@@ -17,6 +17,8 @@ var manualDiscordIDs = map[int]string{
 	1777151: "457793308094365696", // Chanklatomica22 (Start.gg ID 1777151)
 	405098:  "154669333367357440", // SorattaKun (Start.gg ID 405098)
 	316182:  "412024447613141002", // farra (Start.gg ID 316182)
+	5008791: "626599750493405225", // Fenrir.rz (Start.gg ID -> ID real de Discord)
+	5192070: "995230647775928370", // OWOSEVEN (Start.gg ID -> ID real de Discord)
 }
 
 // Torneos manuales: tag escrito a mano (en minúsculas) -> ID de Discord del jugador.
