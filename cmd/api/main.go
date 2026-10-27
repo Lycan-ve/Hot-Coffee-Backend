@@ -232,12 +232,19 @@ func main() {
 
 	// GET /api/sync -> Permite disparar la sincronización manualmente llamando al endpoint HTTP
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
-		if startGGToken != "" {
-			go runFullSync(startGGToken, db, dg)
-		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Write([]byte(`{"status": "success", "message": "Sincronización de torneos desde Discord iniciada."}`))
+
+		if startGGToken == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"status": "error", "message": "STARTGG_TOKEN no está configurado"}`))
+			return
+		}
+
+		// Ejecutamos de forma síncrona (sin 'go') para que HTTP espere a que termine el proceso completo
+		runFullSync(startGGToken, db, dg)
+
+		w.Write([]byte(`{"status": "success", "message": "¡Sincronización completada con éxito!"}`))
 	})
 
 	// Inicia el servidor HTTP web en el puerto 8080
