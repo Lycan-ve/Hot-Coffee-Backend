@@ -73,6 +73,7 @@ type gqlEnvelope struct {
 type eventSummary struct {
 	ID        int    `json:"id"`
 	Name      string `json:"name"`
+	State     int    `json:"state"` // 🆕 Añadimos el estado del evento (3 = Finalizado)
 	Videogame struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
@@ -123,6 +124,7 @@ query TournamentEvents($slug: String!) {
     events {
       id
       name
+      state # 🆕 Solicitamos el estado del evento a Start.gg
       videogame { id name }
     }
   }
@@ -331,8 +333,9 @@ func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.D
 				continue
 			}
 
+			// Si tienes esta función, pasa un mapa vacío o nil
 			err = db.Transaction(func(tx *gorm.DB) error {
-				if err := applyStandings(tx, ev.ID, nodes); err != nil { // 🆕 ahora recibe ev.ID
+				if err := applyStandings(tx, ev.ID, nodes, map[string]string{}); err != nil {
 					return err
 				}
 				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name}).Error
@@ -347,8 +350,8 @@ func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.D
 	log.Printf("✅ Sincronización completa con los torneos de Discord.\n")
 }
 
-// SyncTournamentsFromDiscordLive procesa los torneos obtenidos dinámicamente vía discordgo
-func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken string, db *gorm.DB) {
+// 1. Firma actualizada de SyncTournamentsFromDiscordLive (ahora acepta activeMembers)
+func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken string, db *gorm.DB, activeMembers map[string]string) {
 	log.Printf("🔍 Procesando %d torneos únicos obtenidos desde Discord.\n", len(tournaments))
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -368,16 +371,22 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 		log.Printf("   ↳ %d eventos encontrados en %s\n", len(tr.Tournament.Events), t.Slug)
 
 		for _, ev := range tr.Tournament.Events {
+			// 🛑 REGLA ESTRICTA: El torneo/evento DEBE estar terminado (State == 3 en Start.gg)
+			if ev.State != 3 {
+				log.Printf("   ⏭️  Evento %d (%s) omitido: El torneo aún no ha finalizado (Estado actual: %d)\n", ev.ID, ev.Name, ev.State)
+				continue
+			}
+
 			vgName := strings.ToLower(ev.Videogame.Name)
 			if strings.Contains(vgName, "street fighter") || strings.Contains(vgName, "sf6") {
-				log.Printf("   ⏭️  Evento %d (%s) omitido: %s\n", ev.ID, ev.Name, ev.Videogame.Name)
+				log.Printf("   ⏭️  Evento %d (%s) omitido por videojuego: %s\n", ev.ID, ev.Name, ev.Videogame.Name)
 				continue
 			}
 
 			var already int64
 			db.Model(&ProcessedEvent{}).Where("event_id = ?", ev.ID).Count(&already)
 			if already > 0 {
-				log.Printf("   ⏭️  Evento %d (%s) ya procesado\n", ev.ID, ev.Name)
+				log.Printf("   ⏭️  Evento %d (%s) ya procesado anteriormente\n", ev.ID, ev.Name)
 				continue
 			}
 
@@ -388,7 +397,7 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 			}
 
 			err = db.Transaction(func(tx *gorm.DB) error {
-				if err := applyStandings(tx, ev.ID, nodes); err != nil {
+				if err := applyStandings(tx, ev.ID, nodes, activeMembers); err != nil {
 					return err
 				}
 				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name}).Error
@@ -397,14 +406,14 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 				log.Printf("   ❌ Evento %d (%s): error al guardar: %v\n", ev.ID, ev.Name, err)
 				continue
 			}
-			log.Printf("   ✅ Evento %d (%s): %d participantes\n", ev.ID, ev.Name, len(nodes))
+			log.Printf("   ✅ Evento %d (%s) [FINALIZADO]: %d participantes procesados exitosamente.\n", ev.ID, ev.Name, len(nodes))
 		}
 	}
 	log.Printf("✅ Sincronización en vivo con Discord finalizada.\n")
 }
 
-// 🆕 firma nueva: recibe eventID
-func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
+// 2. Corregido el problema de "declared and not used: discordUserID" usando '_'
+func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscordMembers map[string]string) error {
 
 	for _, node := range nodes {
 		earnedPoints := calculatePoints(node.Placement)
@@ -421,27 +430,30 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 			gamerTag = parts[1]
 		}
 
-		if strings.EqualFold(gamerTag, "delete-user") || strings.EqualFold(rawName, "delete-user") ||
-			strings.EqualFold(gamerTag, "deleted user") || strings.EqualFold(rawName, "deleted user") {
-			log.Printf("   ⏭️  Omitiendo usuario bloqueado/eliminado: %s\n", rawName)
+		normalizedTag := strings.ToLower(strings.TrimSpace(gamerTag))
+
+		// 🟢 Usamos '_' para ignorar discordUserID y evitar el error "declared and not used"
+		_, existsInDiscord := activeDiscordMembers[normalizedTag]
+		if !existsInDiscord {
+			log.Printf("   ⏭️ Omitiendo %s: No pertenece al servidor de Discord.", gamerTag)
+			continue
+		}
+
+		if strings.EqualFold(gamerTag, "delete-user") || strings.EqualFold(rawName, "delete-user") {
 			continue
 		}
 
 		for _, participant := range node.Entrant.Participants {
 			playerID := participant.Player.ID
-			if playerID == 0 || blockedPlayerIDs[playerID] { // 🆕
+			if playerID == 0 || blockedPlayerIDs[playerID] {
 				continue
 			}
 
-			// 🆕 cuenta duplicada: los puntos van a la cuenta real
-			merged := false
 			if realID, ok := playerIDAliases[playerID]; ok {
 				playerID = realID
-				merged = true
 			}
 
 			avatarURL := ""
-
 			profileURL := ""
 			if participant.Player.User.Slug != "" {
 				slug := participant.Player.User.Slug
@@ -458,9 +470,6 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 					break
 				}
 			}
-			if avatarURL == "" && len(participant.Player.User.Images) > 0 {
-				avatarURL = participant.Player.User.Images[0].URL
-			}
 
 			var player models.Player
 			err := tx.First(&player, "id = ? AND league = ?", playerID, leagueType).Error
@@ -473,39 +482,34 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode) error {
 					Sponsor:    sponsor,
 					Character:  "2XKO_FIGHTER",
 					AvatarURL:  avatarURL,
-					ProfileURL: profileURL, // 🆕
+					ProfileURL: profileURL,
 					Points:     earnedPoints,
 				}
 				if err := tx.Create(&player).Error; err != nil {
 					return err
 				}
+				log.Printf("✨ Nuevo jugador registrado en el ranking: %s (%d pts)", gamerTag, earnedPoints)
+
 			case err != nil:
 				return err
+
 			default:
 				player.Points += earnedPoints
-				if !merged {
-					player.GamerTag = gamerTag
-					if sponsor != "" {
-						player.Sponsor = sponsor
-					}
-					if avatarURL != "" {
-						player.AvatarURL = avatarURL
-					}
-					if profileURL != "" { // 🆕
-						player.ProfileURL = profileURL
-					}
+				player.GamerTag = gamerTag
+				if sponsor != "" {
+					player.Sponsor = sponsor
+				}
+				if avatarURL != "" {
+					player.AvatarURL = avatarURL
+				}
+				if profileURL != "" {
+					player.ProfileURL = profileURL
 				}
 				if err := tx.Save(&player).Error; err != nil {
 					return err
 				}
+				log.Printf("📈 Puntos actualizados para %s: Ahora tiene %d pts (+%d)", gamerTag, player.Points, earnedPoints)
 			}
-
-			log.Printf("Jugador: %s | User ID: %d | Slug: '%s' | Imágenes: %d\n",
-				gamerTag,
-				participant.Player.ID,
-				participant.Player.User.Slug,
-				len(participant.Player.User.Images),
-			)
 
 			if err := recordResult(tx, playerID, eventID, earnedPoints); err != nil {
 				return err

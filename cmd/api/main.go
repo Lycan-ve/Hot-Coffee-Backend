@@ -30,7 +30,12 @@ func InitDatabase() {
 		log.Fatal("❌ Error al conectar a la base de datos:", err)
 	}
 
-	db.AutoMigrate(&models.Player{}, &startgg.ProcessedEvent{}, &models.PlayerResult{}) // 🆕 PlayerResult
+	db.AutoMigrate(
+		&models.Player{},
+		&startgg.ProcessedEvent{},
+		&models.PlayerResult{},
+		&models.Matchmaking{}, // 🆕 Añadido aquí
+	)
 	fmt.Println("✅ Base de datos conectada y migrada correctamente.")
 }
 
@@ -84,15 +89,17 @@ func runFullSync(startGGToken string, db *gorm.DB) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
 	startgg.CleanupDuplicatePlayers(db)
 
-	// 1. Obtener torneos en vivo desde el canal de Discord configurado
-	discordTournaments := discord.FetchTournamentsFromDiscord()
-	if len(discordTournaments) > 0 {
-		startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db)
+	// Fetch de torneos y sesión activa de Discord
+	discordTournaments, dgSession := discord.FetchTournamentsFromDiscord()
+
+	if len(discordTournaments) > 0 && dgSession != nil {
+		guildID := os.Getenv("DISCORD_GUILD_ID") // ID de tu servidor
+		activeMembers := discord.GetGuildMembersMap(dgSession, guildID)
+
+		startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembers)
 	}
 
-	// 2. Procesar torneos manuales definidos en código
 	startgg.SyncManualTournaments(db)
-
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
 
