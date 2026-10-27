@@ -3,38 +3,43 @@ package discord
 import (
 	"log"
 	"os"
-	"strings"
 
 	"smash-backend/internal/startgg"
 
 	"github.com/bwmarrin/discordgo"
 )
 
-// DiscordUserMap guarda los tags/usernames de los usuarios presentes en el servidor
-type DiscordUserMap map[string]string // Key: Tag en minúsculas, Value: Discord User ID
+// DiscordUserMap: clave = ID de usuario de Discord, valor = username (solo informativo)
+type DiscordUserMap map[string]string
 
-// GetGuildMembersMap obtiene todos los miembros del servidor de Discord
 func GetGuildMembersMap(s *discordgo.Session, guildID string) DiscordUserMap {
 	membersMap := make(DiscordUserMap)
 
 	if guildID == "" || guildID == "members" {
-		log.Println("❌ Error: DISCORD_GUILD_ID no está configurado en las variables de entorno o es inválido.")
+		log.Println("❌ Error: DISCORD_GUILD_ID no está configurado o es inválido.")
 		return membersMap
 	}
 
-	members, err := s.GuildMembers(guildID, "", 1000)
-	if err != nil {
-		log.Printf("❌ Error al obtener miembros del servidor (GuildID: %s): %v\n", guildID, err)
-		return membersMap
-	}
-
-	for _, m := range members {
-		membersMap[strings.ToLower(m.User.Username)] = m.User.ID
-		if m.User.GlobalName != "" {
-			membersMap[strings.ToLower(m.User.GlobalName)] = m.User.ID
+	after := ""
+	for {
+		batch, err := s.GuildMembers(guildID, after, 1000)
+		if err != nil {
+			log.Printf("❌ Error al obtener miembros (GuildID: %s): %v\n", guildID, err)
+			return make(DiscordUserMap) // lista incompleta = vacía, para no validar a medias
 		}
+		for _, m := range batch {
+			if m.User == nil || m.User.Bot {
+				continue
+			}
+			membersMap[m.User.ID] = m.User.Username
+		}
+		if len(batch) < 1000 {
+			break
+		}
+		after = batch[len(batch)-1].User.ID
 	}
 
+	log.Printf("👥 %d miembros cargados del servidor de Discord\n", len(membersMap))
 	return membersMap
 }
 

@@ -107,12 +107,14 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	startgg.CleanupDuplicatePlayers(db)
 
 	// Obtener los miembros activos del servidor de Discord para la validación estricta
-	var activeMembers map[string]string
-	if dgSession != nil {
-		guildID := os.Getenv("DISCORD_GUILD_ID")
-		activeMembers = discord.GetGuildMembersMap(dgSession, guildID)
-	} else {
-		activeMembers = make(map[string]string)
+	if dgSession == nil {
+		log.Println("🛑 Sin sesión de Discord: se cancela la sync.")
+		return
+	}
+	activeMembers := discord.GetGuildMembersMap(dgSession, os.Getenv("DISCORD_GUILD_ID"))
+	if len(activeMembers) == 0 {
+		log.Println("🛑 No se pudo cargar la lista de miembros de Discord: se cancela la sync para no marcar torneos como procesados sin jugadores.")
+		return
 	}
 
 	// 2. Sincronizar utilizando el archivo JSON de Discord

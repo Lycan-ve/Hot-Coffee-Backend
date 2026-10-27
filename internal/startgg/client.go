@@ -87,6 +87,11 @@ type tournamentEventsResp struct {
 	} `json:"tournament"`
 }
 
+type startggAuth struct {
+	ExternalID       string `json:"externalId"`
+	ExternalUsername string `json:"externalUsername"`
+}
+
 type standingNode struct {
 	Placement int `json:"placement"`
 	Entrant   struct {
@@ -100,6 +105,7 @@ type standingNode struct {
 						Type string `json:"type"`
 						URL  string `json:"url"`
 					} `json:"images"`
+					Authorizations []startggAuth `json:"authorizations"`
 				} `json:"user"`
 			} `json:"player"`
 		} `json:"participants"`
@@ -142,9 +148,10 @@ query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
           participants {
             player {
               id
-              user {
+                user {
                 slug
                 images { type url }
+                authorizations(types: [DISCORD]) { externalId externalUsername }
               }
             }
           }
@@ -278,58 +285,30 @@ func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
 	}).Error
 }
 
-func fetchDiscordFromProfile(client *http.Client, profileURL string) string {
-	if profileURL == "" {
-		return ""
+// resolveDiscordID devuelve el ID de Discord SOLO si hay una cuenta vinculada
+// y ese ID pertenece al servidor. Si no, devuelve el motivo.
+func resolveDiscordID(playerID int, auths []startggAuth, members map[string]string) (string, string) {
+	// 1) Excepción manual (jugadores sin Discord vinculado en Start.gg)
+	if id, ok := manualDiscordIDs[playerID]; ok {
+		if _, inGuild := members[id]; inGuild {
+			return id, ""
+		}
+		return "", "excepción manual: ese ID de Discord no está en el servidor"
 	}
 
-	req, err := http.NewRequest("GET", profileURL, nil)
-	if err != nil {
-		return ""
+	// 2) Discord vinculado en Start.gg
+	if len(auths) == 0 {
+		return "", "no tiene Discord vinculado en Start.gg (o lo tiene oculto)"
 	}
-	// User-Agent para simular un navegador y evitar bloqueos
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) HotCoffeeBot/1.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
+	for _, a := range auths {
+		if a.ExternalID == "" {
+			continue
+		}
+		if _, ok := members[a.ExternalID]; ok {
+			return a.ExternalID, ""
+		}
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return ""
-	}
-	htmlContent := string(bodyBytes)
-
-	// Extraer el contenido del script __NEXT_DATA__
-	reScript := regexp.MustCompile(`<script id="__NEXT_DATA__"[^>]*>(.*?)</script>`)
-	matches := reScript.FindStringSubmatch(htmlContent)
-	if len(matches) < 2 {
-		return ""
-	}
-
-	jsonData := matches[1]
-
-	// Buscar el externalUsername asociado al tipo DISCORD dentro del JSON del perfil
-	reDiscord := regexp.MustCompile(`(?i)"type"\s*:\s*"DISCORD"\s*,\s*"externalUsername"\s*:\s*"([^"]+)"`)
-	discordMatches := reDiscord.FindStringSubmatch(jsonData)
-	if len(discordMatches) >= 2 {
-		return discordMatches[1]
-	}
-
-	// Búsqueda alternativa por si el orden de las propiedades varía en el JSON
-	reDiscordAlt := regexp.MustCompile(`(?i)"externalUsername"\s*:\s*"([^"]+)"[^\}]*"type"\s*:\s*"DISCORD"`)
-	discordMatchesAlt := reDiscordAlt.FindStringSubmatch(jsonData)
-	if len(discordMatchesAlt) >= 2 {
-		return discordMatchesAlt[1]
-	}
-
-	return ""
+	return "", fmt.Sprintf("su Discord vinculado (%s) no está en el servidor", auths[0].ExternalUsername)
 }
 
 // ---------- Sincronización ----------
@@ -548,34 +527,10 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				}
 			}
 
-			// 🆕 NUEVO: Obtener el Discord handle visitando el perfil público de Start.gg
-			// 🆕 Crear un cliente HTTP local para el scraping del perfil
-			httpClient := &http.Client{Timeout: 10 * time.Second}
-			discordHandle := fetchDiscordFromProfile(httpClient, profileURL)
-
-			// Validar pertenencia al servidor de Discord:
-			var discordUserID string
-			foundInDiscord := false
-
-			// 1. Intentar match con el handle de Discord extraído del perfil
-			if discordHandle != "" {
-				if uid, ok := activeDiscordMembers[strings.ToLower(discordHandle)]; ok {
-					discordUserID = uid
-					foundInDiscord = true
-				}
-			}
-			// 2. Respaldo: Intentar match directo con el gamerTag
-			if !foundInDiscord {
-				normalizedTag := strings.ToLower(strings.TrimSpace(gamerTag))
-				if uid, ok := activeDiscordMembers[normalizedTag]; ok {
-					discordUserID = uid
-					foundInDiscord = true
-				}
-			}
-
-			// 🛑 REGLA ESTRICTA: Si no está en el servidor de Discord por ninguna vía, se omite
-			if !foundInDiscord {
-				log.Printf("   ⏭️ Omitiendo %s: No pertenece al servidor de Discord.\n", gamerTag)
+			// Validación estricta por ID de Discord (sin scraping ni comparar nombres)
+			discordUserID, reason := resolveDiscordID(playerID, user.Authorizations, activeDiscordMembers)
+			if discordUserID == "" {
+				log.Printf("   ⏭️ Omitiendo %s (start.gg id %d): %s.\n", gamerTag, playerID, reason)
 				continue
 			}
 

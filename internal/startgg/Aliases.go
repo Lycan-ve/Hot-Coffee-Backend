@@ -9,6 +9,12 @@ import (
 	"gorm.io/gorm"
 )
 
+// Start.gg player id -> ID de Discord (clic derecho > Copiar ID de usuario).
+// Solo para quienes no tienen Discord vinculado visible en Start.gg.
+var manualDiscordIDs = map[int]string{
+	// 3410491: "123456789012345678", // Ñembo
+}
+
 // Cuentas de Start.gg duplicadas: id duplicado -> id de la cuenta real
 var playerIDAliases = map[int]int{
 	5118308: 5008791, // ErrezetaFnrir -> Fenrir.rz
