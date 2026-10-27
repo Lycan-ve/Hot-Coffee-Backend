@@ -11,13 +11,21 @@ import (
 
 // Start.gg player id -> ID de Discord (clic derecho > Copiar ID de usuario).
 // Solo para quienes no tienen Discord vinculado visible en Start.gg.
+// Start.gg player id -> ID de Discord
 var manualDiscordIDs = map[int]string{
-	// 3410491: "123456789012345678", // Ñembo
+	906092:  "774816873996091393", // Ajosac96 (Start.gg ID visto en tus logs)
+	1777151: "457793308094365696", // Chanklatomica22 (Start.gg ID 1777151)
+	405098:  "154669333367357440", // SorattaKun (Start.gg ID 405098)
+	316182:  "412024447613141002", // farra (Start.gg ID 316182)
 }
 
 // Torneos manuales: tag escrito a mano (en minúsculas) -> ID de Discord del jugador.
 // Sin una entrada aquí (o sin un alias a una cuenta ya verificada) el jugador se omite.
+// Torneos manuales: tag escrito a mano (en minúsculas) -> ID de Discord del jugador
+// Torneos manuales: tag escrito a mano (en minúsculas) -> ID de Discord del jugador
 var manualTagDiscordIDs = map[string]string{
+	"daigo masafumi": "714370722213920800",
+	"miyamura":       "TU_DISCORD_ID_DE_MIYAMURA", // <--- Agrégalo aquí
 	// "gaskman": "123456789012345678",
 }
 
