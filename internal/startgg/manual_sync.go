@@ -22,7 +22,7 @@ type ManualTournament struct {
 	Standings []ManualStanding
 }
 
-func SyncManualTournaments(db *gorm.DB) {
+func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 	manualTournaments := []ManualTournament{
 		{
 			EventID: 900001,
@@ -78,6 +78,17 @@ func SyncManualTournaments(db *gorm.DB) {
 
 				var player models.Player
 				err := tx.First(&player, "id = ? AND league = ?", playerID, leagueType).Error
+				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+
+				// Validación estricta: el jugador debe tener un Discord verificado dentro del servidor
+				discordID := resolveManualDiscordID(item.GamerTag, player.DiscordID, activeMembers)
+				if discordID == "" {
+					log.Printf("   ⏭️  Omitiendo '%s' (top %d, torneo manual): no se pudo verificar su Discord en el servidor.\n", item.GamerTag, item.Placement)
+					continue
+				}
+
 				switch {
 				case errors.Is(err, gorm.ErrRecordNotFound):
 					player = models.Player{
@@ -85,6 +96,7 @@ func SyncManualTournaments(db *gorm.DB) {
 						League:    leagueType,
 						GamerTag:  item.GamerTag,
 						Character: "2XKO_FIGHTER",
+						DiscordID: discordID,
 						Points:    earnedPoints,
 					}
 					if err := tx.Create(&player).Error; err != nil {
@@ -94,6 +106,7 @@ func SyncManualTournaments(db *gorm.DB) {
 					return err
 				default:
 					player.Points += earnedPoints
+					player.DiscordID = discordID
 					if !isAlias { // 🆕 no renombrar la cuenta real con el tag manual
 						player.GamerTag = item.GamerTag
 					}

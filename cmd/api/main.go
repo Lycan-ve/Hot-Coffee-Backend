@@ -130,7 +130,7 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	// }
 
 	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
-	startgg.SyncManualTournaments(db)
+	startgg.SyncManualTournaments(db, activeMembers)
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
 

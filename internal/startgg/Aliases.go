@@ -15,6 +15,12 @@ var manualDiscordIDs = map[int]string{
 	// 3410491: "123456789012345678", // Ñembo
 }
 
+// Torneos manuales: tag escrito a mano (en minúsculas) -> ID de Discord del jugador.
+// Sin una entrada aquí (o sin un alias a una cuenta ya verificada) el jugador se omite.
+var manualTagDiscordIDs = map[string]string{
+	// "gaskman": "123456789012345678",
+}
+
 // Cuentas de Start.gg duplicadas: id duplicado -> id de la cuenta real
 var playerIDAliases = map[int]int{
 	5118308: 5008791, // ErrezetaFnrir -> Fenrir.rz
@@ -67,4 +73,21 @@ func CleanupDuplicatePlayers(db *gorm.DB) {
 	for id := range blockedPlayerIDs {
 		db.Where("league = ? AND id = ?", leagueType, id).Delete(&models.Player{})
 	}
+}
+
+// resolveManualDiscordID devuelve el ID de Discord de un tag de torneo manual SOLO si
+// pertenece al servidor. Usa el mapa manual o, si no hay, el ID ya verificado en la DB.
+func resolveManualDiscordID(tag, storedID string, members map[string]string) string {
+	if id, ok := manualTagDiscordIDs[strings.ToLower(tag)]; ok {
+		if _, inGuild := members[id]; inGuild {
+			return id
+		}
+		return ""
+	}
+	if storedID != "" {
+		if _, inGuild := members[storedID]; inGuild {
+			return storedID
+		}
+	}
+	return ""
 }

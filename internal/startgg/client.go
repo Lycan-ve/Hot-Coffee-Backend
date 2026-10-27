@@ -285,30 +285,49 @@ func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
 	}).Error
 }
 
-// resolveDiscordID devuelve el ID de Discord SOLO si hay una cuenta vinculada
-// y ese ID pertenece al servidor. Si no, devuelve el motivo.
-func resolveDiscordID(playerID int, auths []startggAuth, members map[string]string) (string, string) {
-	// 1) Excepción manual (jugadores sin Discord vinculado en Start.gg)
-	if id, ok := manualDiscordIDs[playerID]; ok {
-		if _, inGuild := members[id]; inGuild {
-			return id, ""
+// resolveDiscordID devuelve el ID de Discord SOLO si ese ID pertenece al servidor.
+// Todo se compara por ID numérico (snowflake), nunca por nombre de usuario.
+// Orden de prioridad:
+//  1. Excepción manual (por id original de Start.gg o por el id ya unificado por alias)
+//  2. Discord vinculado en Start.gg (authorizations)
+//  3. Solo si Start.gg no expone ningún Discord: el ID que ya se verificó antes y está en la DB
+//
+// Devuelve (id, "") si es válido, o ("", motivo) si no.
+func resolveDiscordID(originalID, playerID int, auths []startggAuth, members map[string]string, storedID string) (string, string) {
+	// 1) Excepción manual
+	for _, key := range []int{originalID, playerID} {
+		if id, ok := manualDiscordIDs[key]; ok {
+			if _, inGuild := members[id]; inGuild {
+				return id, ""
+			}
+			return "", fmt.Sprintf("excepción manual: el ID de Discord %s no está en el servidor", id)
 		}
-		return "", "excepción manual: ese ID de Discord no está en el servidor"
 	}
 
 	// 2) Discord vinculado en Start.gg
-	if len(auths) == 0 {
-		return "", "no tiene Discord vinculado en Start.gg (o lo tiene oculto)"
-	}
+	linked := make([]string, 0, len(auths))
 	for _, a := range auths {
-		if a.ExternalID == "" {
+		id := strings.TrimSpace(a.ExternalID)
+		if id == "" {
 			continue
 		}
-		if _, ok := members[a.ExternalID]; ok {
-			return a.ExternalID, ""
+		if _, ok := members[id]; ok {
+			return id, ""
 		}
+		linked = append(linked, a.ExternalUsername)
 	}
-	return "", fmt.Sprintf("su Discord vinculado (%s) no está en el servidor", auths[0].ExternalUsername)
+	if len(linked) > 0 {
+		return "", fmt.Sprintf("su Discord vinculado (%s) no está en el servidor", strings.Join(linked, ", "))
+	}
+
+	// 3) Start.gg no muestra Discord (oculto o sin vincular): usar el ID ya verificado antes
+	if storedID != "" {
+		if _, ok := members[storedID]; ok {
+			return storedID, ""
+		}
+		return "", "el Discord verificado anteriormente ya no está en el servidor"
+	}
+	return "", "no tiene Discord vinculado en Start.gg (o lo tiene oculto)"
 }
 
 // ---------- Sincronización ----------
@@ -366,9 +385,9 @@ func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.D
 				continue
 			}
 
-			// Si tienes esta función, pasa un mapa vacío o nil
+			// Se valida contra los miembros reales del servidor de Discord
 			err = db.Transaction(func(tx *gorm.DB) error {
-				if err := applyStandings(tx, ev.ID, nodes, map[string]string{}); err != nil {
+				if err := applyStandings(tx, ev.ID, nodes, activeMembers); err != nil {
 					return err
 				}
 				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name}).Error
@@ -477,6 +496,11 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 
 // 2. Corregido el problema de "declared and not used: discordUserID" usando '_'
 func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscordMembers map[string]string) error {
+	// Sin lista de miembros es imposible validar: devolver error revierte la transacción
+	// y el evento NO queda marcado como procesado (se reintenta en la próxima sync).
+	if len(activeDiscordMembers) == 0 {
+		return errors.New("lista de miembros de Discord vacía: no se puede validar a los jugadores")
+	}
 
 	for _, node := range nodes {
 		earnedPoints := calculatePoints(node.Placement)
@@ -498,7 +522,8 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 		}
 
 		for _, participant := range node.Entrant.Participants {
-			playerID := participant.Player.ID
+			originalID := participant.Player.ID // id de Start.gg tal cual viene (antes de aplicar alias)
+			playerID := originalID
 			if playerID == 0 || blockedPlayerIDs[playerID] {
 				continue
 			}
@@ -527,15 +552,20 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				}
 			}
 
+			// Se carga primero el jugador (si ya existe) para poder usar su Discord ya verificado como respaldo
+			var player models.Player
+			err := tx.First(&player, "id = ? AND league = ?", playerID, leagueType).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+
 			// Validación estricta por ID de Discord (sin scraping ni comparar nombres)
-			discordUserID, reason := resolveDiscordID(playerID, user.Authorizations, activeDiscordMembers)
+			discordUserID, reason := resolveDiscordID(originalID, playerID, user.Authorizations, activeDiscordMembers, player.DiscordID)
 			if discordUserID == "" {
-				log.Printf("   ⏭️ Omitiendo %s (start.gg id %d): %s.\n", gamerTag, playerID, reason)
+				log.Printf("   ⏭️ Omitiendo %s (top %d, start.gg id %d): %s.\n", gamerTag, node.Placement, originalID, reason)
 				continue
 			}
 
-			var player models.Player
-			err := tx.First(&player, "id = ? AND league = ?", playerID, leagueType).Error
 			switch {
 			case errors.Is(err, gorm.ErrRecordNotFound):
 				// CASO A: Jugador nuevo en el ranking, lo indexamos con su Discord ID
