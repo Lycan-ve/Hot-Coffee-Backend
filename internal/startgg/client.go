@@ -290,6 +290,60 @@ func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
 	}).Error
 }
 
+func fetchDiscordFromProfile(client *http.Client, profileURL string) string {
+	if profileURL == "" {
+		return ""
+	}
+
+	req, err := http.NewRequest("GET", profileURL, nil)
+	if err != nil {
+		return ""
+	}
+	// User-Agent para simular un navegador y evitar bloqueos
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) HotCoffeeBot/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	htmlContent := string(bodyBytes)
+
+	// Extraer el contenido del script __NEXT_DATA__
+	reScript := regexp.MustCompile(`<script id="__NEXT_DATA__"[^>]*>(.*?)</script>`)
+	matches := reScript.FindStringSubmatch(htmlContent)
+	if len(matches) < 2 {
+		return ""
+	}
+
+	jsonData := matches[1]
+
+	// Buscar el externalUsername asociado al tipo DISCORD dentro del JSON del perfil
+	reDiscord := regexp.MustCompile(`(?i)"type"\s*:\s*"DISCORD"\s*,\s*"externalUsername"\s*:\s*"([^"]+)"`)
+	discordMatches := reDiscord.FindStringSubmatch(jsonData)
+	if len(discordMatches) >= 2 {
+		return discordMatches[1]
+	}
+
+	// Búsqueda alternativa por si el orden de las propiedades varía en el JSON
+	reDiscordAlt := regexp.MustCompile(`(?i)"externalUsername"\s*:\s*"([^"]+)"[^\}]*"type"\s*:\s*"DISCORD"`)
+	discordMatchesAlt := reDiscordAlt.FindStringSubmatch(jsonData)
+	if len(discordMatchesAlt) >= 2 {
+		return discordMatchesAlt[1]
+	}
+
+	return ""
+}
+
 // ---------- Sincronización ----------
 
 func SyncTournamentsFromDiscordJSON(filePath string, apiToken string, db *gorm.DB, activeMembers map[string]string) {
@@ -487,6 +541,7 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 			}
 
 			user := participant.Player.User
+			// Construir profileURL si existe el slug
 			avatarURL := ""
 			profileURL := ""
 			if user.Slug != "" {
@@ -505,29 +560,23 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				}
 			}
 
-			// 1. Buscar si el usuario tiene una cuenta de Discord vinculada en su perfil de Start.gg
-			discordHandle := ""
-			for _, acc := range user.ExternalAccounts {
-				if strings.EqualFold(acc.Type, "DISCORD") {
-					discordHandle = acc.ExternalUsername
-					if discordHandle == "" {
-						discordHandle = acc.Identifier
-					}
-					break
-				}
-			}
+			// 🆕 NUEVO: Obtener el Discord handle visitando el perfil público de Start.gg
+			// 🆕 Crear un cliente HTTP local para el scraping del perfil
+			httpClient := &http.Client{Timeout: 10 * time.Second}
+			discordHandle := fetchDiscordFromProfile(httpClient, profileURL)
 
-			// 2. Validar pertenencia al servidor de Discord:
-			// Primero probamos con el handle de Discord de Start.gg; si no está, respaldamos comprobando el gamerTag.
+			// Validar pertenencia al servidor de Discord:
 			var discordUserID string
 			foundInDiscord := false
 
+			// 1. Intentar match con el handle de Discord extraído del perfil
 			if discordHandle != "" {
 				if uid, ok := activeDiscordMembers[strings.ToLower(discordHandle)]; ok {
 					discordUserID = uid
 					foundInDiscord = true
 				}
 			}
+			// 2. Respaldo: Intentar match directo con el gamerTag
 			if !foundInDiscord {
 				normalizedTag := strings.ToLower(strings.TrimSpace(gamerTag))
 				if uid, ok := activeDiscordMembers[normalizedTag]; ok {
@@ -536,9 +585,9 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				}
 			}
 
-			// 3. 🛑 REGLA ESTRICTA: Si no está en el servidor de Discord, se omite y no se indexa
+			// 🛑 REGLA ESTRICTA: Si no está en el servidor de Discord por ninguna vía, se omite
 			if !foundInDiscord {
-				log.Printf("   ⏭️ Omitiendo %s: No pertenece al servidor de Discord (ni por Start.gg ni por tag).\n", gamerTag)
+				log.Printf("   ⏭️ Omitiendo %s: No pertenece al servidor de Discord.\n", gamerTag)
 				continue
 			}
 
