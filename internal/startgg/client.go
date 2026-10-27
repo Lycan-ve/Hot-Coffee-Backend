@@ -87,6 +87,12 @@ type tournamentEventsResp struct {
 	} `json:"tournament"`
 }
 
+type externalAccount struct {
+	Type             string `json:"type"`
+	ExternalUsername string `json:"externalUsername"`
+	Identifier       string `json:"identifier"`
+}
+
 type standingNode struct {
 	Placement int `json:"placement"`
 	Entrant   struct {
@@ -95,11 +101,12 @@ type standingNode struct {
 			Player struct {
 				ID   int `json:"id"`
 				User struct {
-					Slug   string `json:"slug"` // 🆕 Slug del usuario en start.gg
+					Slug   string `json:"slug"`
 					Images []struct {
 						Type string `json:"type"`
 						URL  string `json:"url"`
 					} `json:"images"`
+					ExternalAccounts []externalAccount `json:"externalAccounts"` // 🆕
 				} `json:"user"`
 			} `json:"player"`
 		} `json:"participants"`
@@ -143,8 +150,13 @@ query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
             player {
               id
               user {
-                slug # 🆕 Solicitamos el slug del usuario
+                slug
                 images { type url }
+                externalAccounts {
+                  type
+                  externalUsername
+                  identifier
+                }
               }
             }
           }
@@ -460,15 +472,6 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 			gamerTag = parts[1]
 		}
 
-		normalizedTag := strings.ToLower(strings.TrimSpace(gamerTag))
-
-		// 🟢 Usamos '_' para ignorar discordUserID y evitar el error "declared and not used"
-		_, existsInDiscord := activeDiscordMembers[normalizedTag]
-		if !existsInDiscord {
-			log.Printf("   ⏭️ Omitiendo %s: No pertenece al servidor de Discord.", gamerTag)
-			continue
-		}
-
 		if strings.EqualFold(gamerTag, "delete-user") || strings.EqualFold(rawName, "delete-user") {
 			continue
 		}
@@ -483,10 +486,11 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				playerID = realID
 			}
 
+			user := participant.Player.User
 			avatarURL := ""
 			profileURL := ""
-			if participant.Player.User.Slug != "" {
-				slug := participant.Player.User.Slug
+			if user.Slug != "" {
+				slug := user.Slug
 				if strings.HasPrefix(slug, "user/") {
 					profileURL = "https://www.start.gg/" + slug
 				} else {
@@ -494,17 +498,55 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				}
 			}
 
-			for _, img := range participant.Player.User.Images {
+			for _, img := range user.Images {
 				if img.Type == "profile" {
 					avatarURL = img.URL
 					break
 				}
 			}
 
+			// 1. Buscar si el usuario tiene una cuenta de Discord vinculada en su perfil de Start.gg
+			discordHandle := ""
+			for _, acc := range user.ExternalAccounts {
+				if strings.EqualFold(acc.Type, "DISCORD") {
+					discordHandle = acc.ExternalUsername
+					if discordHandle == "" {
+						discordHandle = acc.Identifier
+					}
+					break
+				}
+			}
+
+			// 2. Validar pertenencia al servidor de Discord:
+			// Primero probamos con el handle de Discord de Start.gg; si no está, respaldamos comprobando el gamerTag.
+			var discordUserID string
+			foundInDiscord := false
+
+			if discordHandle != "" {
+				if uid, ok := activeDiscordMembers[strings.ToLower(discordHandle)]; ok {
+					discordUserID = uid
+					foundInDiscord = true
+				}
+			}
+			if !foundInDiscord {
+				normalizedTag := strings.ToLower(strings.TrimSpace(gamerTag))
+				if uid, ok := activeDiscordMembers[normalizedTag]; ok {
+					discordUserID = uid
+					foundInDiscord = true
+				}
+			}
+
+			// 3. 🛑 REGLA ESTRICTA: Si no está en el servidor de Discord, se omite y no se indexa
+			if !foundInDiscord {
+				log.Printf("   ⏭️ Omitiendo %s: No pertenece al servidor de Discord (ni por Start.gg ni por tag).\n", gamerTag)
+				continue
+			}
+
 			var player models.Player
 			err := tx.First(&player, "id = ? AND league = ?", playerID, leagueType).Error
 			switch {
 			case errors.Is(err, gorm.ErrRecordNotFound):
+				// CASO A: Jugador nuevo en el ranking, lo indexamos con su Discord ID
 				player = models.Player{
 					ID:         playerID,
 					League:     leagueType,
@@ -513,19 +555,22 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 					Character:  "2XKO_FIGHTER",
 					AvatarURL:  avatarURL,
 					ProfileURL: profileURL,
+					DiscordID:  discordUserID, // 🆕 Indexamos su ID de Discord
 					Points:     earnedPoints,
 				}
 				if err := tx.Create(&player).Error; err != nil {
 					return err
 				}
-				log.Printf("✨ Nuevo jugador registrado en el ranking: %s (%d pts)", gamerTag, earnedPoints)
+				log.Printf("✨ Nuevo jugador registrado en el ranking: %s (%d pts) [Discord ID: %s]\n", gamerTag, earnedPoints, discordUserID)
 
 			case err != nil:
 				return err
 
 			default:
+				// CASO B: El jugador ya existe, sumamos puntos y actualizamos su info y Discord ID
 				player.Points += earnedPoints
 				player.GamerTag = gamerTag
+				player.DiscordID = discordUserID
 				if sponsor != "" {
 					player.Sponsor = sponsor
 				}
@@ -538,7 +583,7 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				if err := tx.Save(&player).Error; err != nil {
 					return err
 				}
-				log.Printf("📈 Puntos actualizados para %s: Ahora tiene %d pts (+%d)", gamerTag, player.Points, earnedPoints)
+				log.Printf("📈 Puntos actualizados para %s: Ahora tiene %d pts (+%d) [Discord ID: %s]\n", gamerTag, player.Points, earnedPoints, discordUserID)
 			}
 
 			if err := recordResult(tx, playerID, eventID, earnedPoints); err != nil {

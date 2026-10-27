@@ -7,7 +7,8 @@ type Player struct {
 	Sponsor    string `json:"sponsor"`
 	Character  string `json:"character"`
 	AvatarURL  string `json:"avatarUrl"`
-	ProfileURL string `json:"profileUrl"` // 🆕 URL del perfil de Start.gg
+	ProfileURL string `json:"profileUrl"` // URL del perfil de Start.gg
+	DiscordID  string `json:"discordId"`  // 🆕 ID de Discord indexado del usuario
 	Points     int    `json:"points"`
 	Ranking    int    `json:"ranking" gorm:"-"`
 }

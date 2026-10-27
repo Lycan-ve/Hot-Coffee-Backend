@@ -103,21 +103,21 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session) {
 	log.Printf("🔄 Iniciando sincronización completa...\n")
 
-	// 1. Limpia perfiles o etiquetas duplicadas en la base de datos
-	startgg.CleanupDuplicatePlayers(db)
+	// // 1. Limpia perfiles o etiquetas duplicadas en la base de datos
+	// startgg.CleanupDuplicatePlayers(db)
 
-	// 2. Lee los enlaces/slugs de Start.gg publicados en el canal de calendario de Discord
-	discordTournaments, _ := discord.FetchTournamentsFromDiscord()
+	// // 2. Lee los enlaces/slugs de Start.gg publicados en el canal de calendario de Discord
+	// discordTournaments, _ := discord.FetchTournamentsFromDiscord()
 
-	if len(discordTournaments) > 0 && dgSession != nil {
-		// 3. Obtiene los miembros activos del servidor de Discord para validar que solo se dé puntos
-		// a quienes estén dentro del servidor.
-		guildID := os.Getenv("DISCORD_GUILD_ID")
-		activeMembers := discord.GetGuildMembersMap(dgSession, guildID)
+	// if len(discordTournaments) > 0 && dgSession != nil {
+	// 	// 3. Obtiene los miembros activos del servidor de Discord para validar que solo se dé puntos
+	// 	// a quienes estén dentro del servidor.
+	// 	guildID := os.Getenv("DISCORD_GUILD_ID")
+	// 	activeMembers := discord.GetGuildMembersMap(dgSession, guildID)
 
-		// 4. Procesa y guarda los resultados de Start.gg filtrando por estado COMPLETED y miembros válidos.
-		startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembers)
-	}
+	// 	// 4. Procesa y guarda los resultados de Start.gg filtrando por estado COMPLETED y miembros válidos.
+	// 	startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembers)
+	// }
 
 	// 5. Ejecuta torneos configurados de forma manual (id > 900000)
 	startgg.SyncManualTournaments(db)
