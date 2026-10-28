@@ -14,9 +14,12 @@ type Matchmaking struct {
 	Player2Tag       string `json:"player2_tag"`
 	Player2Avatar    string `json:"player2_avatar"`
 	TargetFT         int    `json:"target_ft"`
-	Score1           int    `json:"score_1"`
-	Score2           int    `json:"score_2"`
-	PointsAtStake    int    `json:"points_at_stake"`
+	// RoomCode es el código de la sala que escribe el retador en /ft sala:...
+	// El rival lo copia del panel para entrar a la sala. Vacío = reta sin sala definida.
+	RoomCode      string `json:"room_code"`
+	Score1        int    `json:"score_1"`
+	Score2        int    `json:"score_2"`
+	PointsAtStake int    `json:"points_at_stake"`
 	// PENDING, IN_PROGRESS, PENDING_AGREE, FINISHED, REJECTED, CANCELLED
 	Status          string    `gorm:"index" json:"status"`
 	WinnerDiscordID string    `json:"winner_discord_id"`

@@ -38,7 +38,7 @@ func InitDatabase() {
 	// - Players: Perfiles de jugadores y puntos globales
 	// - ProcessedEvents: Historial de eventos de Start.gg procesados
 	// - PlayerResults: Resultados puntuales de cada jugador por evento
-	// - Matchmaking: Registro de las retas/desafíos FT (estados, marcadores)
+	// - Matchmaking: Registro de las retas/desafíos FT (estados, marcadores y código de sala)
 	// - MatchmakingPlayers: Ranking de MATCHMAKING (separado del ranking de torneos)
 	if err := db.AutoMigrate(
 		&models.Player{},
@@ -198,7 +198,7 @@ func main() {
 
 	log.Printf("🤖 ¡Bot de Discord conectado y en línea exitosamente!")
 
-	// Construcción del comando de barra /ft con sus opciones (objetivo y rival)
+	// Construcción del comando de barra /ft con sus opciones (objetivo, rival y sala)
 	cmd := &discordgo.ApplicationCommand{
 		Name:        "ft",
 		Description: "Inicia un matchmaking FT (3, 5, 7, 10) contra un rival",
@@ -220,6 +220,14 @@ func main() {
 				Name:        "rival",
 				Description: "Usuario contra el que jugarás",
 				Required:    true,
+			},
+			{
+				// Sala: código de la sala que crea el retador. Llega por DM al rival
+				// (y luego en el hilo del combate) para que solo lo copie y entre.
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "sala",
+				Description: "Código de la sala para que tu rival copie y entre (opcional)",
+				Required:    false,
 			},
 		},
 	}

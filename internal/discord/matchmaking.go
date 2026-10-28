@@ -146,6 +146,15 @@ func withMatch(db *gorm.DB, matchID uint64, fn func(tx *gorm.DB, m *models.Match
 	return match, err
 }
 
+// roomCodeLine devuelve la línea con el código de la sala (vacía si la reta no tiene código).
+// Se incluye en los paneles del hilo para que el rival pueda copiarlo en cualquier momento.
+func roomCodeLine(m models.Matchmaking) string {
+	if m.RoomCode == "" {
+		return ""
+	}
+	return fmt.Sprintf("🏠 **Código de la sala:** `%s`\n\n", m.RoomCode)
+}
+
 // ---------------------------------------------------------------------------
 // /ft
 // ---------------------------------------------------------------------------
@@ -172,14 +181,18 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 
 	targetFT := 0
 	rivalID := ""
+	roomCode := ""
 	for _, opt := range data.Options {
 		switch opt.Name {
 		case "objetivo":
 			targetFT = int(opt.IntValue())
 		case "rival":
 			rivalID, _ = opt.Value.(string)
+		case "sala":
+			roomCode, _ = opt.Value.(string)
 		}
 	}
+	roomCode = strings.TrimSpace(roomCode)
 
 	if author == nil || rivalID == "" {
 		reply("❌ Comando inválido.")
@@ -220,6 +233,7 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		Player2Tag:       rival.Username,
 		Player2Avatar:    rival.AvatarURL("128"),
 		TargetFT:         targetFT,
+		RoomCode:         roomCode,
 		PointsAtStake:    targetFT * 5,
 		Status:           statusPending,
 	}
@@ -229,8 +243,13 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		return
 	}
 
-	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos de Matchmaking en juego: **%d pts**\n\n¿Aceptas el desafío?",
+	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos de Matchmaking en juego: **%d pts**\n\n",
 		targetFT, author.Username, match.PointsAtStake)
+	if roomCode != "" {
+		// El código va en bloque de código para que el rival lo copie con un clic/toque.
+		content += fmt.Sprintf("🏠 **Código de la sala:** `%s`\n➡️ *Cópialo y úsalo para entrar a la sala.*\n\n", roomCode)
+	}
+	content += "¿Aceptas el desafío?"
 
 	keyboard := discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
@@ -261,7 +280,11 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		return
 	}
 
-	reply(fmt.Sprintf("✅ Invitación enviada al privado de **%s**. Esperando su respuesta...", rival.Username))
+	successMsg := fmt.Sprintf("✅ Invitación enviada al privado de **%s**. Esperando su respuesta...", rival.Username)
+	if roomCode != "" {
+		successMsg += fmt.Sprintf("\n🏠 Código de sala enviado: `%s`", roomCode)
+	}
+	reply(successMsg)
 }
 
 // ---------------------------------------------------------------------------
@@ -339,8 +362,11 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	}
 
 	channelID := getMatchmakingChannelID()
-	baseMsg, err := s.ChannelMessageSend(channelID,
-		fmt.Sprintf("⚔️ **¡RETA ACEPTADA!**\n<@%s> vs <@%s> (FT %d)", match.Player1DiscordID, match.Player2DiscordID, match.TargetFT))
+	baseContent := fmt.Sprintf("⚔️ **¡RETA ACEPTADA!**\n<@%s> vs <@%s> (FT %d)", match.Player1DiscordID, match.Player2DiscordID, match.TargetFT)
+	if match.RoomCode != "" {
+		baseContent += fmt.Sprintf("\n🏠 Sala: `%s`", match.RoomCode)
+	}
+	baseMsg, err := s.ChannelMessageSend(channelID, baseContent)
 	if err != nil {
 		log.Printf("❌ No se pudo escribir en el canal de matchmaking: %v\n", err)
 		revert("❌ Error al escribir en el canal de matchmaking público.")
@@ -357,11 +383,11 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	}
 
 	if err := db.Model(&match).Update("ThreadID", thread.ID).Error; err != nil {
-		log.Printf("❌ No se pudo guardar el hilo de la reta %d: %v\n", match.ID, err)
+		log.Printf("❌ No se pudo guardar el ThreadID de la reta %d: %v — el hilo no podrá cerrarse automáticamente al finalizar.\n", match.ID, err)
 	}
 
-	roundContent := fmt.Sprintf("🎮 **¡MATCHMAKING INICIADO!**\n⚔️ <@%s> vs <@%s>\n💰 Puntos de Matchmaking en juego: **%d pts**\n\n🔒 *Solo los combatientes pueden interactuar con este panel.*\n\n¿Quién ganó la **Ronda 1**?",
-		match.Player1DiscordID, match.Player2DiscordID, match.PointsAtStake)
+	roundContent := fmt.Sprintf("🎮 **¡MATCHMAKING INICIADO!**\n⚔️ <@%s> vs <@%s>\n💰 Puntos de Matchmaking en juego: **%d pts**\n\n%s🔒 *Solo los combatientes pueden interactuar con este panel.*\n\n¿Quién ganó la **Ronda 1**?",
+		match.Player1DiscordID, match.Player2DiscordID, match.PointsAtStake, roomCodeLine(match))
 
 	_, err = s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
 		Content:    roundContent,
@@ -374,11 +400,11 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	editMessage(s, i, fmt.Sprintf("✅ ¡Has aceptado la reta! Espacio de combate creado: <#%s>", thread.ID), nil)
 
 	if dm, err := s.UserChannelCreate(match.Player1DiscordID); err == nil {
-		_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Entra al hilo para jugar: <#%s>", match.Player2Tag, match.TargetFT, thread.ID))
-	}
-
-	if err := db.Model(&match).Update("ThreadID", thread.ID).Error; err != nil {
-		log.Printf("❌ No se pudo guardar el ThreadID de la reta %d: %v — el hilo no podrá cerrarse automáticamente al finalizar.\n", match.ID, err)
+		dmMsg := fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Entra al hilo para jugar: <#%s>", match.Player2Tag, match.TargetFT, thread.ID)
+		if match.RoomCode != "" {
+			dmMsg += fmt.Sprintf("\n🏠 Código de la sala: `%s`", match.RoomCode)
+		}
+		_, _ = s.ChannelMessageSend(dm.ID, dmMsg)
 	}
 }
 
@@ -466,8 +492,8 @@ func handleWin(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB
 		return
 	}
 
-	nextRound := fmt.Sprintf("🎮 **MATCHMAKING FT %d** (Meta: %d victorias)\n🥊 **%s** (**%d**) vs (**%d**) **%s**\n\n¿Quién gana la siguiente ronda?",
-		match.TargetFT, match.TargetFT, match.Player1Tag, match.Score1, match.Score2, match.Player2Tag)
+	nextRound := fmt.Sprintf("🎮 **MATCHMAKING FT %d** (Meta: %d victorias)\n🥊 **%s** (**%d**) vs (**%d**) **%s**\n\n%s¿Quién gana la siguiente ronda?",
+		match.TargetFT, match.TargetFT, match.Player1Tag, match.Score1, match.Score2, match.Player2Tag, roomCodeLine(match))
 	editMessage(s, i, nextRound, []discordgo.MessageComponent{getRoundKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
 }
 
@@ -492,8 +518,8 @@ func handleReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.
 		return
 	}
 
-	content := fmt.Sprintf("🔄 **MARCADOR REINICIADO / CORREGIDO**\n🥊 **%s** (0) vs (0) **%s**\n\nRegistren las rondas de nuevo. ¿Quién ganó la **Ronda 1**?",
-		match.Player1Tag, match.Player2Tag)
+	content := fmt.Sprintf("🔄 **MARCADOR REINICIADO / CORREGIDO**\n🥊 **%s** (0) vs (0) **%s**\n\n%sRegistren las rondas de nuevo. ¿Quién ganó la **Ronda 1**?",
+		match.Player1Tag, match.Player2Tag, roomCodeLine(match))
 	editMessage(s, i, content, []discordgo.MessageComponent{getRoundKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
 }
 
@@ -574,7 +600,6 @@ func handleAgree(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.
 		getMatchmakingResultChannelID(),
 	), nil)
 
-	// Reporte y limpieza del hilo en segundo plano (ya no hay ninguna interacción esperando).
 	// Reporte y limpieza del hilo en segundo plano (ya no hay ninguna interacción esperando).
 	r := *report
 	go func() {
