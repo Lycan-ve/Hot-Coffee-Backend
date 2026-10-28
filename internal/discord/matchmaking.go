@@ -376,6 +376,10 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	if dm, err := s.UserChannelCreate(match.Player1DiscordID); err == nil {
 		_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Entra al hilo para jugar: <#%s>", match.Player2Tag, match.TargetFT, thread.ID))
 	}
+
+	if err := db.Model(&match).Update("ThreadID", thread.ID).Error; err != nil {
+		log.Printf("❌ No se pudo guardar el ThreadID de la reta %d: %v — el hilo no podrá cerrarse automáticamente al finalizar.\n", match.ID, err)
+	}
 }
 
 // 2. RECHAZAR RETA
@@ -571,16 +575,54 @@ func handleAgree(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.
 	), nil)
 
 	// Reporte y limpieza del hilo en segundo plano (ya no hay ninguna interacción esperando).
+	// Reporte y limpieza del hilo en segundo plano (ya no hay ninguna interacción esperando).
 	r := *report
 	go func() {
 		sendMatchmakingReport(s, r)
-		if r.Match.ThreadID != "" {
-			time.Sleep(5 * time.Second)
-			if _, err := s.ChannelDelete(r.Match.ThreadID); err != nil {
-				log.Printf("⚠️ No se pudo borrar el hilo %s: %v\n", r.Match.ThreadID, err)
-			}
-		}
+		closeMatchThread(s, r.Match)
 	}()
+}
+
+// closeMatchThread cierra el hilo de una reta terminada, tras la demora anunciada al usuario.
+// Estrategia en cascada:
+//  1. Borra el hilo (requiere permiso "Gestionar hilos" / MANAGE_THREADS).
+//  2. Si falla (p. ej. 50013 Missing Permissions), archiva el hilo como fallback:
+//     el creador del hilo (el bot) puede archivarlo aunque no tenga ese permiso.
+func closeMatchThread(s *discordgo.Session, m models.Matchmaking) {
+	if m.ThreadID == "" {
+		log.Printf("⚠️ Reta %d sin ThreadID guardado: no se puede cerrar el hilo automáticamente.\n", m.ID)
+		return
+	}
+
+	time.Sleep(5 * time.Second)
+
+	if _, err := s.ChannelDelete(m.ThreadID); err != nil {
+		log.Printf("⚠️ No se pudo borrar el hilo %s: %v — se intenta archivar como fallback.\n", m.ThreadID, err)
+		archiveFallback(s, m.ThreadID)
+		return
+	}
+	log.Printf("🗑️ Hilo %s (reta %d) eliminado automáticamente.\n", m.ThreadID, m.ID)
+}
+
+// archiveFallback archiva (y bloquea, si el permiso lo permite) un hilo que no se pudo borrar.
+func archiveFallback(s *discordgo.Session, threadID string) {
+	archived, locked := true, true
+
+	// Intento 1: archivar Y bloquear en la misma petición.
+	if _, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{
+		Archived: &archived,
+		Locked:   &locked,
+	}); err == nil {
+		log.Printf("🔒 Hilo %s archivado y bloqueado (fallback de borrado).\n", threadID)
+		return
+	}
+
+	// Intento 2: solo archivar — el creador del hilo puede archivar sin MANAGE_THREADS.
+	if _, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{Archived: &archived}); err != nil {
+		log.Printf("❌ No se pudo cerrar el hilo %s: %v (revisa el permiso 'Gestionar hilos' del bot).\n", threadID, err)
+		return
+	}
+	log.Printf("🗂️ Hilo %s archivado (el bloqueo requiere 'Gestionar hilos').\n", threadID)
 }
 
 // ---------------------------------------------------------------------------
