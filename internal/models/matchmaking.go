@@ -24,7 +24,14 @@ type Matchmaking struct {
 	Score2           int    `json:"score_2"`
 	PointsAtStake    int    `json:"points_at_stake"`
 	// PENDING, IN_PROGRESS, PENDING_AGREE, CLOSING, FINISHED, REJECTED, CANCELLED
-	Status          string    `gorm:"index" json:"status"`
+	Status string `gorm:"index" json:"status"`
+	// Confirmación doble de rondas (anti "puntos fantasmas"): cuando un combatiente
+	// marca quién ganó la ronda, queda como PROPUESTA (PendingRoundSide = "p1"/"p2",
+	// PendingRoundBy = quién la propuso) hasta que el OTRO combatiente presione el
+	// mismo botón. Vacíos = no hay ronda pendiente de confirmar.
+	PendingRoundSide string `json:"pending_round_side"`
+	PendingRoundBy   string `json:"pending_round_by"`
+
 	WinnerDiscordID string    `json:"winner_discord_id"`
 	LoserDiscordID  string    `json:"loser_discord_id"`
 	ThreadID        string    `json:"thread_id"`

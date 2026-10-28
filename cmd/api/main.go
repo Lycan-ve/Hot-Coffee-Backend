@@ -237,13 +237,35 @@ func main() {
 		},
 	}
 
-	// Registra el comando directamente en tu servidor (Guild Command) para disponibilidad instantánea.
+	// Comando de barra /cerrarset — exclusivo del Staff (el bot verifica permisos
+	// en cada uso): cierra un set en curso con el marcador actual del hilo.
+	cmdCerrarSet := &discordgo.ApplicationCommand{
+		Name:        "cerrarset",
+		Description: "(Staff) Cierra un set en curso con el marcador actual: gana quien va ganando",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:         discordgo.ApplicationCommandOptionChannel,
+				Name:         "hilo",
+				Description:  "Hilo del set que hay que cerrar",
+				Required:     true,
+				ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildPublicThread},
+			},
+		},
+	}
+
+	// Registra los comandos directamente en tu servidor (Guild Command) para disponibilidad instantánea.
+	cmds := []*discordgo.ApplicationCommand{cmd, cmdCerrarSet}
+	for _, c := range cmds {
+		if guildID != "" {
+			dg.ApplicationCommandCreate(dg.State.User.ID, guildID, c)
+		} else {
+			dg.ApplicationCommandCreate(dg.State.User.ID, "", c)
+		}
+	}
 	if guildID != "" {
-		dg.ApplicationCommandCreate(dg.State.User.ID, guildID, cmd)
-		log.Printf("📌 Comando /ft registrado instantáneamente para el servidor: %s", guildID)
+		log.Printf("📌 Comandos /ft y /cerrarset registrados instantáneamente para el servidor: %s", guildID)
 	} else {
-		dg.ApplicationCommandCreate(dg.State.User.ID, "", cmd)
-		log.Println("⚠️ DISCORD_GUILD_ID no configurado; el comando /ft se registró globalmente (puede tardar en aparecer).")
+		log.Println("⚠️ DISCORD_GUILD_ID no configurado; los comandos se registraron globalmente (pueden tardar en aparecer).")
 	}
 
 	// Ejecuta la sincronización de Start.gg al iniciar en una rutina asíncrona (goroutine)

@@ -63,8 +63,11 @@ func RegisterMatchmakingHandlers(s *discordgo.Session, db *gorm.DB) {
 	s.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		switch i.Type {
 		case discordgo.InteractionApplicationCommand:
-			if i.ApplicationCommandData().Name == "ft" {
+			switch i.ApplicationCommandData().Name {
+			case "ft":
 				handleFTCommand(s, i, db)
+			case "cerrarset":
+				handleCerrarSetCommand(s, i, db)
 			}
 		case discordgo.InteractionMessageComponent:
 			handleComponentInteraction(s, i, db)
@@ -402,7 +405,7 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 		log.Printf("❌ No se pudo guardar el ThreadID de la reta %d: %v — el hilo no podrá cerrarse automáticamente al finalizar.\n", match.ID, err)
 	}
 
-	roundContent := fmt.Sprintf("🎮 **¡MATCHMAKING INICIADO!**\n⚔️ <@%s> vs <@%s>\n💰 Puntos de Matchmaking en juego: **%d pts**\n\n%s🔒 *Solo los combatientes pueden interactuar con este panel.*\n🚪 *¿Alguien se tiene que ir? «🏳️ Cerrar set» termina el FT con el marcador actual.*\n\n¿Quién ganó la **Ronda 1**?",
+	roundContent := fmt.Sprintf("🎮 **¡MATCHMAKING INICIADO!**\n⚔️ <@%s> vs <@%s>\n💰 Puntos de Matchmaking en juego: **%d pts**\n\n%s🔒 *Solo los combatientes pueden interactuar con este panel.*\n✅ *Cada ronda la confirman ambos: uno propone quién ganó y el otro presiona el mismo botón.*\n🚪 *¿Alguien se tiene que ir? «🏳️ Cerrar set» termina el FT con el marcador actual. Si nadie responde, el Staff puede usar `/cerrarset`.*\n\n¿Quién ganó la **Ronda 1**?",
 		match.Player1DiscordID, match.Player2DiscordID, match.PointsAtStake, roomCodeLine(match))
 
 	_, err = s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
@@ -443,9 +446,18 @@ func handleReject(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	editMessage(s, i, "❌ Has rechazado la solicitud de reta.", nil)
 }
 
-// 3. ANOTAR RONDA
+// 3. ANOTAR RONDA — con confirmación doble (anti "puntos fantasmas"):
+// un combatiente propone quién ganó la ronda y el OTRO debe presionar el mismo
+// botón para que la ronda cuente. Nadie puede anotar a escondidas ni robar puntos.
 func handleWin(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64, side string) {
-	reached := false
+	if side != "p1" && side != "p2" {
+		replyEphemeral(s, i, "⚠️ Botón no válido.")
+		return
+	}
+
+	reached := false   // la ronda confirmada llegó al FT
+	confirmed := false // este clic confirmó una ronda propuesta
+	disputed := false  // este clic contradice la propuesta vigente
 
 	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
 		if !isCombatant(user.ID, m) {
@@ -455,26 +467,43 @@ func handleWin(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB
 			return userError{"⚠️ Este matchmaking no está en curso."}
 		}
 
-		switch side {
-		case "p1":
-			m.Score1++
-		case "p2":
-			m.Score2++
-		default:
-			return userError{"⚠️ Botón no válido."}
+		// CASO 1: hay propuesta del mismo lado y este clic es del OTRO jugador → CONFIRMA la ronda.
+		if m.PendingRoundSide == side && m.PendingRoundBy != "" && m.PendingRoundBy != user.ID {
+			confirmed = true
+			m.PendingRoundSide, m.PendingRoundBy = "", ""
+			switch side {
+			case "p1":
+				m.Score1++
+			case "p2":
+				m.Score2++
+			}
+
+			if m.Score1 >= m.TargetFT || m.Score2 >= m.TargetFT {
+				reached = true
+				m.Status = statusPendingAgree
+				m.P1Confirmed = false
+				m.P2Confirmed = false
+				if m.Score1 > m.Score2 {
+					m.WinnerDiscordID, m.LoserDiscordID = m.Player1DiscordID, m.Player2DiscordID
+				} else {
+					m.WinnerDiscordID, m.LoserDiscordID = m.Player2DiscordID, m.Player1DiscordID
+				}
+			}
+			return nil
 		}
 
-		if m.Score1 >= m.TargetFT || m.Score2 >= m.TargetFT {
-			reached = true
-			m.Status = statusPendingAgree
-			m.P1Confirmed = false
-			m.P2Confirmed = false
-			if m.Score1 > m.Score2 {
-				m.WinnerDiscordID, m.LoserDiscordID = m.Player1DiscordID, m.Player2DiscordID
-			} else {
-				m.WinnerDiscordID, m.LoserDiscordID = m.Player2DiscordID, m.Player1DiscordID
-			}
+		// CASO 2: el mismo jugador repite su propuesta → nada nuevo.
+		if m.PendingRoundSide == side && m.PendingRoundBy == user.ID {
+			return userError{fmt.Sprintf("⏳ Ya propusiste esta ronda. **%s** debe presionar el mismo botón para confirmarla.", otherTag(*m, user.ID))}
 		}
+
+		// CASO 3: propuesta nueva, o discrepancia (contradice la propuesta vigente:
+		// la última propuesta queda vigente y el otro debe confirmarla).
+		if m.PendingRoundSide != "" {
+			disputed = true
+		}
+		m.PendingRoundSide = side
+		m.PendingRoundBy = user.ID
 		return nil
 	})
 	if err != nil {
@@ -482,6 +511,29 @@ func handleWin(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB
 		return
 	}
 
+	// Ronda PROPUESTA: panel esperando la confirmación del otro combatiente.
+	if !confirmed {
+		winnerTag, winnerID := match.Player2Tag, match.Player2DiscordID
+		if side == "p1" {
+			winnerTag, winnerID = match.Player1Tag, match.Player1DiscordID
+		}
+		extra := ""
+		if disputed {
+			extra = "⚠️ Hubo discrepancia con la propuesta anterior: queda vigente esta última.\n"
+		}
+		editMessage(s, i, fmt.Sprintf(
+			"🗳️ **RONDA EN CONFIRMACIÓN**\n"+
+				"%s"+
+				"**<@%s>** propone que esta ronda es para **<@%s>**.\n"+
+				"➡️ **<@%s>** debe presionar el mismo botón (**Gana %s**) para que la ronda cuente.\n\n"+
+				"%s🥊 **%s** (**%d**) vs (**%d**) **%s**",
+			extra, user.ID, winnerID, otherID(match, user.ID), winnerTag,
+			roomCodeLine(match), match.Player1Tag, match.Score1, match.Score2, match.Player2Tag,
+		), []discordgo.MessageComponent{getRoundKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
+		return
+	}
+
+	// Ronda CONFIRMADA: mismos paneles de siempre.
 	if reached {
 		confirmContent := fmt.Sprintf(
 			"🔍 **PREVISUALIZACIÓN DEL RESULTADO (FT %d)**\n\n"+
@@ -514,6 +566,14 @@ func handleWin(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB
 	editMessage(s, i, nextRound, []discordgo.MessageComponent{getRoundKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
 }
 
+// otherID devuelve el ID de Discord del "otro" combatiente.
+func otherID(m models.Matchmaking, discordID string) string {
+	if discordID == m.Player1DiscordID {
+		return m.Player2DiscordID
+	}
+	return m.Player1DiscordID
+}
+
 // 4. REINICIAR / CORREGIR
 func handleReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
 	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
@@ -527,6 +587,7 @@ func handleReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.
 		m.Score1, m.Score2 = 0, 0
 		m.P1Confirmed, m.P2Confirmed = false, false
 		m.WinnerDiscordID, m.LoserDiscordID = "", ""
+		m.PendingRoundSide, m.PendingRoundBy = "", ""
 		m.CloseRequestedBy = ""
 		m.Status = statusInProgress
 		return nil
@@ -677,6 +738,7 @@ func handleCloseRequest(s *discordgo.Session, i *discordgo.InteractionCreate, db
 		}
 		m.Status = statusClosing
 		m.CloseRequestedBy = user.ID
+		m.PendingRoundSide, m.PendingRoundBy = "", ""
 		return nil
 	})
 	if err != nil {
@@ -754,6 +816,7 @@ func handleCancelClose(s *discordgo.Session, i *discordgo.InteractionCreate, db 
 		}
 		m.Status = statusInProgress
 		m.CloseRequestedBy = ""
+		m.PendingRoundSide, m.PendingRoundBy = "", ""
 		return nil
 	})
 	if err != nil {
@@ -1014,6 +1077,130 @@ func announceAndClose(s *discordgo.Session, m models.Matchmaking, threadMsg stri
 			closeMatchThread(s, m)
 		}
 	}()
+}
+
+// ---------------------------------------------------------------------------
+// /cerrarset — cierre de un set por Admin o Moderador del servidor
+// ---------------------------------------------------------------------------
+
+// getModRoleIDs devuelve los IDs de roles considerados staff además de
+// Administrador y Gestionar-Servidor (variable DISCORD_MOD_ROLE_IDS, separada por comas).
+func getModRoleIDs() []string {
+	raw := strings.TrimSpace(os.Getenv("DISCORD_MOD_ROLE_IDS"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	ids := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if id := strings.TrimSpace(p); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// isStaff indica si quien interactúa es Admin/Moderador: permiso de Administrador,
+// de Gestionar el servidor, o un rol listado en DISCORD_MOD_ROLE_IDS.
+func isStaff(i *discordgo.InteractionCreate) bool {
+	if i.Member == nil {
+		return false
+	}
+	if p := i.Member.Permissions; p&discordgo.PermissionAdministrator != 0 || p&discordgo.PermissionManageServer != 0 {
+		return true
+	}
+	modRoles := getModRoleIDs()
+	if len(modRoles) == 0 {
+		return false
+	}
+	for _, role := range i.Member.Roles {
+		for _, mod := range modRoles {
+			if role == mod {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// handleCerrarSetCommand implementa /cerrarset hilo:<hilo>.
+// Caso de uso (LATAM): FT10 que quedó 4-2 porque alguien se fue o se quedó sin luz
+// y nadie presiona los botones. El staff cierra el set con el marcador REAL:
+// gana quien va arriba con los puntos completos del FT; empate = cancelación sin puntos.
+func handleCerrarSetCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+	})
+	if err != nil {
+		log.Printf("❌ No se pudo confirmar el comando /cerrarset a Discord: %v\n", err)
+		return
+	}
+	reply := func(content string) {
+		if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &content}); err != nil {
+			log.Printf("❌ No se pudo responder al comando /cerrarset: %v\n", err)
+		}
+	}
+
+	if !isStaff(i) {
+		reply("🚫 **Acceso denegado:** este comando es solo para Admins o Moderadores del servidor.")
+		return
+	}
+
+	threadID := ""
+	for _, opt := range i.ApplicationCommandData().Options {
+		if opt.Name == "hilo" {
+			threadID, _ = opt.Value.(string)
+		}
+	}
+	if threadID == "" {
+		reply("❌ Comando inválido: falta el hilo de la reta.")
+		return
+	}
+
+	var m models.Matchmaking
+	if err := db.Where("thread_id = ?", threadID).Order("id DESC").First(&m).Error; err != nil {
+		reply("⚠️ No hay ninguna reta asociada a ese hilo.")
+		return
+	}
+
+	var report *matchReport
+	cancelled := false
+
+	res, err := withMatch(db, uint64(m.ID), func(tx *gorm.DB, mm *models.Matchmaking) error {
+		if mm.Status != statusInProgress && mm.Status != statusClosing {
+			return userError{"⚠️ Esa reta no está en curso (ya terminó, se canceló o está esperando la confirmación del resultado)."}
+		}
+		mm.CloseRequestedBy = ""
+		mm.PendingRoundSide, mm.PendingRoundBy = "", ""
+		r, applied, err := finishEarly(tx, mm)
+		if err != nil {
+			return err
+		}
+		if applied {
+			report = &r
+		} else {
+			cancelled = true
+		}
+		return nil
+	})
+	if err != nil {
+		respondError(s, i, err)
+		return
+	}
+
+	if cancelled {
+		reply("🕊️ **Set cerrado en empate:** la reta se canceló sin puntos.")
+		announceAndClose(s, res, "🛡️ **CIERRE POR STAFF**\nUn Admin/Moderador cerró este set con el marcador empatado: la reta se cancela **sin puntos**.\n\n⚠️ Este hilo se eliminará automáticamente en 5 segundos...", nil)
+		return
+	}
+
+	r := *report
+	reply(fmt.Sprintf("🛡️ **Set cerrado:** 🏆 **%s** con el marcador `%d - %d`. Puntos aplicados y reporte publicado.", getWinnerTag(res), res.Score1, res.Score2))
+	announceAndClose(s, res, fmt.Sprintf(
+		"🛡️ **CIERRE POR STAFF**\nUn Admin/Moderador cerró este set con el marcador actual: **%s** `%d - %d` **%s** → 🏆 **%s**.\n\n⚠️ Este hilo se eliminará automáticamente en 5 segundos...",
+		res.Player1Tag, res.Score1, res.Score2, res.Player2Tag, getWinnerTag(res),
+	), &r)
 }
 
 // ---------------------------------------------------------------------------
