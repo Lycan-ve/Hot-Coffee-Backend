@@ -189,6 +189,11 @@ func main() {
 	// Registrar manejadores de eventos (escuchadores de clics de botones y slash commands)
 	discord.RegisterMatchmakingHandlers(dg, db)
 
+	// Janitor de matchmaking: resuelve los casos en que nadie presiona los botones:
+	// auto-confirmación tras 2 minutos, cierre automático de sets abandonados ("Cerrar set"),
+	// cancelación de sets inactivos (2 h) y de retas vencidas sin respuesta (30 min).
+	discord.StartMatchmakingJanitor(dg, db)
+
 	// Abre el WebSocket en vivo con los servidores de Discord (Pone al bot EN LÍNEA)
 	err = dg.Open()
 	if err != nil {

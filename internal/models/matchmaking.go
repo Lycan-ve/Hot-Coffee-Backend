@@ -16,11 +16,14 @@ type Matchmaking struct {
 	TargetFT         int    `json:"target_ft"`
 	// RoomCode es el código de la sala que escribe el retador en /ft sala:...
 	// El rival lo copia del panel para entrar a la sala. Vacío = reta sin sala definida.
-	RoomCode      string `json:"room_code"`
-	Score1        int    `json:"score_1"`
-	Score2        int    `json:"score_2"`
-	PointsAtStake int    `json:"points_at_stake"`
-	// PENDING, IN_PROGRESS, PENDING_AGREE, FINISHED, REJECTED, CANCELLED
+	RoomCode string `json:"room_code"`
+	// CloseRequestedBy guarda quién propuso el cierre anticipado del set (botón "Cerrar set")
+	// mientras la reta está en estado CLOSING. Vacío = nadie ha propuesto cerrar.
+	CloseRequestedBy string `json:"close_requested_by"`
+	Score1           int    `json:"score_1"`
+	Score2           int    `json:"score_2"`
+	PointsAtStake    int    `json:"points_at_stake"`
+	// PENDING, IN_PROGRESS, PENDING_AGREE, CLOSING, FINISHED, REJECTED, CANCELLED
 	Status          string    `gorm:"index" json:"status"`
 	WinnerDiscordID string    `json:"winner_discord_id"`
 	LoserDiscordID  string    `json:"loser_discord_id"`
