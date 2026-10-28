@@ -3,7 +3,7 @@ package models
 import "time"
 
 // Matchmaking es una reta /ft entre dos usuarios de Discord.
-// Se identifica a los jugadores SOLO por su ID de Discord (ya no depende de la tabla players, que es de torneos).
+// Se identifica a los jugadores SOLO por su ID de Discord.
 type Matchmaking struct {
 	ID               uint   `gorm:"primaryKey" json:"id"`
 	League           string `json:"league"`
@@ -14,35 +14,49 @@ type Matchmaking struct {
 	Player2Tag       string `json:"player2_tag"`
 	Player2Avatar    string `json:"player2_avatar"`
 	TargetFT         int    `json:"target_ft"`
-	// RoomCode es el código de la sala que escribe el retador en /ft sala:...
-	// El rival lo copia del panel para entrar a la sala. Vacío = reta sin sala definida.
-	RoomCode string `json:"room_code"`
-	// CloseRequestedBy guarda quién propuso el cierre anticipado del set (botón "Cerrar set")
-	// mientras la reta está en estado CLOSING. Vacío = nadie ha propuesto cerrar.
-	CloseRequestedBy string `json:"close_requested_by"`
 	Score1           int    `json:"score_1"`
 	Score2           int    `json:"score_2"`
 	PointsAtStake    int    `json:"points_at_stake"`
-	// PENDING, IN_PROGRESS, PENDING_AGREE, CLOSING, FINISHED, REJECTED, CANCELLED
-	Status string `gorm:"index" json:"status"`
-	// Confirmación doble de rondas (anti "puntos fantasmas"): cuando un combatiente
-	// marca quién ganó la ronda, queda como PROPUESTA (PendingRoundSide = "p1"/"p2",
-	// PendingRoundBy = quién la propuso) hasta que el OTRO combatiente presione el
-	// mismo botón. Vacíos = no hay ronda pendiente de confirmar.
-	PendingRoundSide string `json:"pending_round_side"`
-	PendingRoundBy   string `json:"pending_round_by"`
+	// PENDING, IN_PROGRESS, PENDING_VERIFY, PENDING_CLOSE, FINISHED, REJECTED, CANCELLED
+	Status          string `gorm:"index" json:"status"`
+	WinnerDiscordID string `json:"winner_discord_id"`
+	LoserDiscordID  string `json:"loser_discord_id"`
+	ThreadID        string `json:"thread_id"`
+	// Mensaje del panel de games dentro del hilo (el janitor lo edita cuando actúa solo).
+	PanelMessageID string `json:"panel_message_id"`
+	// Paneles de equipo dentro del hilo (uno por jugador).
+	TeamPanelMessageID1 string `json:"team_panel_message_id_1"`
+	TeamPanelMessageID2 string `json:"team_panel_message_id_2"`
+	// EQUIPOS 2XKO (IDs del roster de internal/gamechars).
+	P1Char1 string `json:"p1_char1"` // Personaje 1 de Player1 (point)
+	P1Char2 string `json:"p1_char2"` // Personaje 2 de Player1 (assist)
+	P1Fuse  string `json:"p1_fuse"`
+	P2Char1 string `json:"p2_char1"`
+	P2Char2 string `json:"p2_char2"`
+	P2Fuse  string `json:"p2_fuse"`
+	// ORDEN de las victorias, JSON de lados: "[1,2,1]" = P1 ganó el game 1, P2 el 2, P1 el 3.
+	RoundHistory string `json:"round_history"`
+	// Game reportado esperando verificación (1 = ganó Player1, 2 = Player2, 0 = ninguno).
+	PendingGameWinner int `json:"pending_game_winner"`
+	// Relojes del janitor (en la BD: sobreviven reinicios del bot).
+	CloseRequestedAt *time.Time `json:"close_requested_at"` // propuesta de cierre: se cierra a los 2 min
+	CloseRequestedBy string     `json:"close_requested_by"` // quién pidió cerrar el set
+	LastRoundAt      *time.Time `json:"last_round_at"`      // 2 h sin reportar = set cancelado
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
 
-	WinnerDiscordID string    `json:"winner_discord_id"`
-	LoserDiscordID  string    `json:"loser_discord_id"`
-	ThreadID        string    `json:"thread_id"`
-	P1Confirmed     bool      `json:"p1_confirmed"`
-	P2Confirmed     bool      `json:"p2_confirmed"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+// P1TeamComplete / P2TeamComplete: ¿el jugador ya eligió Personaje 1, Personaje 2 y Fusión?
+func (m *Matchmaking) P1TeamComplete() bool {
+	return m.P1Char1 != "" && m.P1Char2 != "" && m.P1Fuse != ""
+}
+
+func (m *Matchmaking) P2TeamComplete() bool {
+	return m.P2Char1 != "" && m.P2Char2 != "" && m.P2Fuse != ""
 }
 
 // MatchmakingPlayer es el jugador del ranking de MATCHMAKING (tabla matchmaking_players).
-// Es independiente de models.Player (tabla players), que pertenece al ranking de TORNEOS.
+// Es independiente de models.Player (tabla players), que es del ranking de TORNEOS.
 type MatchmakingPlayer struct {
 	DiscordID string    `gorm:"primaryKey" json:"discordId"`
 	Username  string    `json:"username"`
