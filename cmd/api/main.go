@@ -258,7 +258,7 @@ func main() {
 		}
 	}
 	if guildID != "" {
-		log.Printf("📌 Comandos /ft y /cerrarset registrados instantáneamente para el servidor: %s", guildID)
+		log.Printf("📌 Comandos /ft registrados instantáneamente para el servidor: %s", guildID)
 	} else {
 		log.Println("⚠️ DISCORD_GUILD_ID no configurado; los comandos se registraron globalmente (pueden tardar en aparecer).")
 	}
