@@ -308,8 +308,13 @@ func main() {
 		w.Write([]byte(`{"status": "success", "message": "¡Sincronización completada con éxito!"}`))
 	})
 
-	// Inicia el servidor HTTP web en el puerto 8080
-	port := ":8080"
-	fmt.Printf("🚀 Servidor corriendo en http://localhost%s\n", port)
-	log.Fatal(http.ListenAndServe(port, nil))
+	// Inicia el servidor HTTP web (Render inyecta PORT por env; en local usa 8080).
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	addr := ":" + port
+	fmt.Printf("🚀 Servidor corriendo en http://localhost%s\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
+
 }
