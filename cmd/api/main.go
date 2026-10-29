@@ -237,24 +237,8 @@ func main() {
 		},
 	}
 
-	// Comando de barra /cerrarset — exclusivo del Staff (el bot verifica permisos
-	// en cada uso): cierra un set en curso con el marcador actual del hilo.
-	cmdCerrarSet := &discordgo.ApplicationCommand{
-		Name:        "cerrarset",
-		Description: "(Staff) Cierra un set en curso con el marcador actual: gana quien va ganando",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:         discordgo.ApplicationCommandOptionChannel,
-				Name:         "hilo",
-				Description:  "Hilo del set que hay que cerrar",
-				Required:     true,
-				ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildPublicThread},
-			},
-		},
-	}
-
 	// Registra los comandos directamente en tu servidor (Guild Command) para disponibilidad instantánea.
-	cmds := []*discordgo.ApplicationCommand{cmd, cmdCerrarSet}
+	cmds := []*discordgo.ApplicationCommand{cmd}
 	for _, c := range cmds {
 		if guildID != "" {
 			dg.ApplicationCommandCreate(dg.State.User.ID, guildID, c)

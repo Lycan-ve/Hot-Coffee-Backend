@@ -14,6 +14,7 @@ type Matchmaking struct {
 	Player2Tag       string `json:"player2_tag"`
 	Player2Avatar    string `json:"player2_avatar"`
 	TargetFT         int    `json:"target_ft"`
+	RoomCode         string `json:"room_code"`
 	Score1           int    `json:"score_1"`
 	Score2           int    `json:"score_2"`
 	PointsAtStake    int    `json:"points_at_stake"`

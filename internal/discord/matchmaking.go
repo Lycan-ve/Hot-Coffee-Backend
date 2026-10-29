@@ -190,12 +190,15 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 
 	targetFT := 0
 	rivalID := ""
+	roomCode := ""
 	for _, opt := range data.Options {
 		switch opt.Name {
 		case "objetivo":
 			targetFT = int(opt.IntValue())
 		case "rival":
 			rivalID, _ = opt.Value.(string)
+		case "sala":
+			roomCode, _ = opt.Value.(string)
 		}
 	}
 
@@ -238,6 +241,7 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		Player2Tag:       rival.Username,
 		Player2Avatar:    rival.AvatarURL("128"),
 		TargetFT:         targetFT,
+		RoomCode:         roomCode,
 		PointsAtStake:    targetFT * 5,
 		Status:           statusPending,
 	}
@@ -247,8 +251,8 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		return
 	}
 
-	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos de Matchmaking en juego: **%d pts**\n\n¿Aceptas el desafío?",
-		targetFT, author.Username, match.PointsAtStake)
+	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos de Matchmaking en juego: **%d pts**\n%s\n¿Aceptas el desafío?",
+		targetFT, author.Username, match.PointsAtStake, roomCodeLine(&match))
 
 	keyboard := discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
@@ -279,7 +283,12 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		return
 	}
 
-	reply(fmt.Sprintf("✅ Invitación enviada al privado de **%s**. Esperando su respuesta...", rival.Username))
+	success := fmt.Sprintf("✅ Invitación enviada al privado de **%s**. Esperando su respuesta...", rival.Username)
+	if roomCode != "" {
+		success += fmt.Sprintf("\n🏠 Código de sala enviado: `%s`", roomCode)
+	}
+	reply(success)
+
 }
 
 // ---------------------------------------------------------------------------
@@ -410,8 +419,9 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 		Components: getPlayerTeamKeyboard(match, "p2"),
 	})
 	gamePanel, err3 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content: fmt.Sprintf("⚔️ <@%s> vs <@%s> (FT %d · 💰 **%d pts**)\n\n"+
-			"⏳ Armen sus equipos en los paneles de arriba: **Personaje 1 + Personaje 2 + Fusión**.\n"+
+		Content: fmt.Sprintf("⚔️ <@%s> vs <@%s> (FT %d · 💰 **%d pts**)\n"+
+			roomCodeLine(&match)+
+			"\n⏳ Armen sus equipos en los paneles de arriba: **Personaje 1 + Personaje 2 + Fusión**.\n"+
 			"El **REPORT GAME 1** aparece aquí cuando ambos equipos estén completos.",
 			match.Player1DiscordID, match.Player2DiscordID, match.TargetFT, match.PointsAtStake),
 	})
@@ -1135,8 +1145,9 @@ func gamePanelContent(m models.Matchmaking) string {
 	gameN := m.Score1 + m.Score2 + 1
 	return fmt.Sprintf("📋 **REPORT GAME %d** — FT %d (Meta: %d victorias)\n"+
 		"▸ **%s** · %s\n"+
-		"▸ **%s** · %s\n\n"+
-		historyBlock(&m)+
+		"▸ **%s** · %s\n"+
+		roomCodeLine(&m)+
+		"\n"+historyBlock(&m)+
 		"¿Quién ganó el **GAME %d**? Presiona **W**.",
 		gameN, m.TargetFT, m.TargetFT,
 		m.Player1Tag, gamechars.TeamLabel(m.P1Char1, m.P1Char2, m.P1Fuse),
@@ -1182,6 +1193,15 @@ func historyBlock(m *models.Matchmaking) string {
 	}
 	fmt.Fprintf(&sb, "**Score** `%d - %d`\n\n", m.Score1, m.Score2)
 	return sb.String()
+}
+
+// roomCodeLine devuelve la línea del código de la sala (vacía si la reta no tiene sala).
+// La sala es OPCIONAL en /ft: sin código no agrega nada.
+func roomCodeLine(m *models.Matchmaking) string {
+	if m.RoomCode == "" {
+		return ""
+	}
+	return fmt.Sprintf("🏠 **Código de la sala:** `%s`\n➡️ *Cópialo y úsalo para entrar a la sala.*\n", m.RoomCode)
 }
 
 // appendRound agrega una victoria al historial (1 = Player1, 2 = Player2).
