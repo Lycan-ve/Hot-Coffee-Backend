@@ -236,6 +236,17 @@ func main() {
 			},
 		},
 	}
+	// Limpieza: /cerrarset fue eliminado (los mods cierran con el botón 🏳️ Cerrar set).
+	// Se borra del servidor si quedó registrado por versiones anteriores.
+	if guildID != "" {
+		if existing, err := dg.ApplicationCommands(dg.State.User.ID, guildID); err == nil {
+			for _, c := range existing {
+				if c.Name == "cerrarset" {
+					_ = dg.ApplicationCommandDelete(dg.State.User.ID, guildID, c.ID)
+				}
+			}
+		}
+	}
 
 	// Registra los comandos directamente en tu servidor (Guild Command) para disponibilidad instantánea.
 	cmds := []*discordgo.ApplicationCommand{cmd}
