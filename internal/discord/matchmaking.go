@@ -154,7 +154,7 @@ func gamePanelEmbed(m models.Matchmaking) (*discordgo.MessageEmbed, []*discordgo
 			files = append(files, card)
 		}
 	} else {
-		embed.Description = fmt.Sprintf("**%d — %d**\n⏳ Armen sus equipos por mensaje privado", m.Score1, m.Score2)
+		embed.Description = fmt.Sprintf("**%d — %d**\n⏳ Armen sus equipos (selección privada)", m.Score1, m.Score2)
 	}
 
 	if m.Player1Avatar != "" {
@@ -481,7 +481,9 @@ func teamPanelEmbedWithBanner(m models.Matchmaking, side string) (*discordgo.Mes
 
 // editMessageEmbedFiles edita el mensaje de la interacción con un embed,
 // componentes y adjuntos (los adjuntos anteriores se reemplazan).
-func editMessageEmbedFiles(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) {
+// Devuelve false si Discord lo rechaza (p. ej. adjuntos al editar el mensaje
+// efímero del /ft) para que el llamador reintente sin archivos.
+func editMessageEmbedFiles(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) bool {
 	if components == nil {
 		components = []discordgo.MessageComponent{}
 	}
@@ -500,7 +502,9 @@ func editMessageEmbedFiles(s *discordgo.Session, i *discordgo.InteractionCreate,
 	})
 	if err != nil {
 		log.Printf("❌ No se pudo editar el panel de equipo: %v\n", err)
+		return false
 	}
+	return true
 }
 
 // replyEphemeral envía un mensaje que solo ve quien hizo clic.
@@ -666,7 +670,21 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 	if roomCode != "" {
 		success += fmt.Sprintf("\n🏠 Código de sala enviado: `%s`", roomCode)
 	}
-	reply(success)
+
+	// El RETADOR arma su equipo AQUÍ MISMO, en la respuesta del /ft (efímera:
+	// solo él la ve). No tiene que ir a ningún MD ni esperar la aceptación.
+	// Su rival no ve nada; el equipo se revela en el hilo solo al confirmar los 3.
+	success += "\n🧩 **Arma tu equipo abajo mientras esperas** — nadie más lo ve."
+	embed := teamPanelEmbed(match, "p1")
+	embeds := []*discordgo.MessageEmbed{embed}
+	components := getPlayerTeamKeyboard(match, "p1")
+	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content:    &success,
+		Embeds:     &embeds,
+		Components: &components,
+	}); err != nil {
+		log.Printf("❌ No se pudo enviar el panel de selección del /ft: %v\n", err)
+	}
 
 }
 
@@ -810,16 +828,32 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 		})
 		return err == nil
 	}
-	p1DM, p2DM := setupDM("p1"), setupDM("p2")
+	// El retado (P2) siempre elige por MD. El retador (P1) ya eligió desde el
+	// panel del /ft en el 99% de los casos: MD SOLO como fallback si no terminó.
+	p2DM := setupDM("p2")
+	p1DM := false
+	if !match.P1TeamComplete() {
+		p1DM = setupDM("p1")
+	}
 
 	// Paneles públicos del hilo: estado SIN picks; si el MD falló, ahí van los menús.
 	pubPanel := func(side string, viaDM bool) *discordgo.MessageSend {
+		// El retador ya confirmó desde el /ft: su ficha se revela de una vez.
+		if side == "p1" && match.P1TeamComplete() {
+			embed, files := teamPanelEmbedWithBanner(match, "p1")
+			return &discordgo.MessageSend{
+				Embeds: []*discordgo.MessageEmbed{embed},
+				Files:  files,
+			}
+		}
 		tag := match.Player1Tag
 		if side == "p2" {
 			tag = match.Player2Tag
 		}
 		foot := "Revisa tus mensajes privados para elegir tu equipo"
-		if !viaDM {
+		if side == "p1" && !viaDM {
+			foot = "No pude enviarte MD: elige tu equipo en el panel del /ft o en este panel"
+		} else if side == "p2" && !viaDM {
 			foot = "No pude enviarte MD: elige tu equipo en este panel"
 		}
 		send := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{{
@@ -841,8 +875,8 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 		Embeds: []*discordgo.MessageEmbed{gpEmbed},
 		Files:  gpFiles,
 	})
-	if !p1DM {
-		log.Printf("⚠️ No se pudo enviar el panel de equipo por MD a %s: menús públicos de fallback.\n", match.Player1Tag)
+	if !p1DM && !match.P1TeamComplete() {
+		log.Printf("⚠️ No se pudo enviar el panel de equipo por MD a %s: usa el panel del /ft.\n", match.Player1Tag)
 	}
 	if !p2DM {
 		log.Printf("⚠️ No se pudo enviar el panel de equipo por MD a %s: menús públicos de fallback.\n", match.Player2Tag)
@@ -875,7 +909,11 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	editMessage(s, i, fmt.Sprintf("✅ ¡Has aceptado la reta! Espacio de combate creado: <#%s>", thread.ID), nil)
 
 	if dm, err := s.UserChannelCreate(match.Player1DiscordID); err == nil {
-		_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Arma tu equipo en este mensaje privado — el hilo es <#%s>", match.Player2Tag, match.TargetFT, thread.ID))
+		if match.P1TeamComplete() {
+			_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Tu equipo ya está confirmado — ¡entra al hilo: <#%s>", match.Player2Tag, match.TargetFT, thread.ID))
+		} else {
+			_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Termina de armar tu equipo (panel del /ft o este MD) — hilo: <#%s>", match.Player2Tag, match.TargetFT, thread.ID))
+		}
 	}
 }
 
@@ -930,7 +968,12 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 		if side == "p2" && user.ID != m.Player2DiscordID {
 			return userError{fmt.Sprintf("🚫 Solo **%s** puede elegir su equipo.", m.Player2Tag)}
 		}
-		if m.Status != statusInProgress {
+		// El RETADOR puede armar su equipo desde el panel del /ft mientras la
+		// reta sigue pendiente; el retado solo después de aceptar.
+		if m.Status == statusPending && side == "p2" {
+			return userError{"⚠️ Aún no has aceptado esta reta."}
+		}
+		if m.Status != statusInProgress && !(m.Status == statusPending && side == "p1") {
 			return userError{"⚠️ El set ya no está en curso."}
 		}
 
@@ -971,14 +1014,20 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 	// ¿El equipo de quien eligió quedó completo (2 personajes + fusión)?
 	teamComplete := (side == "p1" && match.P1TeamComplete()) || (side == "p2" && match.P2TeamComplete())
 
-	// Panel donde se hizo clic (MD privado o fallback público) se actualiza.
+	// Panel donde se hizo clic (MD privado, público o el efímero del /ft).
 	embed, files := teamPanelEmbedWithBanner(match, side)
 	if teamComplete {
-		editMessageEmbedFiles(s, i, embed, nil, files)
-		// Solo al CONFIRMAR se revela el equipo en el panel público del hilo.
+		if !editMessageEmbedFiles(s, i, embed, nil, files) {
+			// El efímero del /ft a veces rechaza adjuntos al editar → sin banner.
+			editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), nil, nil)
+		}
+		// Solo al CONFIRMAR se revela el equipo en el panel público del hilo
+		// (durante la reta pendiente el hilo aún no existe: no pasa nada).
 		refreshPublicTeamPanel(s, match, side)
 	} else {
-		editMessageEmbedFiles(s, i, embed, getPlayerTeamKeyboard(match, side), files)
+		if !editMessageEmbedFiles(s, i, embed, getPlayerTeamKeyboard(match, side), files) {
+			editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), getPlayerTeamKeyboard(match, side), nil)
+		}
 	}
 
 	// Ambos equipos completos → activa el panel de games (tarjeta VS + botones W).
