@@ -113,18 +113,68 @@ func editMessage(s *discordgo.Session, i *discordgo.InteractionCreate, content s
 	}
 }
 
-// winPips: pips de victorias estilo fighting game — un pip por cada game ganado,
-// hueco por los que faltan (hasta el FT). Se entiende de un vistazo.
-func winPips(wins, target int, pip, empty string) string {
-	s := ""
-	for i := 0; i < target; i++ {
-		if i < wins {
-			s += pip
-		} else {
-			s += empty
+// keycap: emoji de número (1..10) para la línea de games del set.
+func keycap(n int) string {
+	switch n {
+	case 1:
+		return "1️⃣"
+	case 2:
+		return "2️⃣"
+	case 3:
+		return "3️⃣"
+	case 4:
+		return "4️⃣"
+	case 5:
+		return "5️⃣"
+	case 6:
+		return "6️⃣"
+	case 7:
+		return "7️⃣"
+	case 8:
+		return "8️⃣"
+	case 9:
+		return "9️⃣"
+	case 10:
+		return "🔟"
+	}
+	return ""
+}
+
+// roundTrack: el set en UNA sola secuencia de games numerados con bolitas —
+// 1️⃣2️⃣3️⃣4️⃣5️⃣ / 🟢🔴🔴🟢⚪. Desde la perspectiva del jugador de referencia
+// (refSide): 🟢 ganó ese game, 🔴 lo perdió, ⚪ aún no se juega.
+func roundTrack(m models.Matchmaking, refSide string) string {
+	var hist []int
+	if b := []byte(m.RoundHistory); len(b) > 0 {
+		if err := json.Unmarshal(b, &hist); err != nil {
+			hist = nil
 		}
 	}
-	return s
+	nums, dots := "", ""
+	for g := 1; g <= m.TargetFT; g++ {
+		nums += keycap(g)
+		switch {
+		case g > len(hist):
+			dots += "⚪"
+		case (hist[g-1] == 1 && refSide == "p1") || (hist[g-1] == 2 && refSide == "p2"):
+			dots += "🟢"
+		default:
+			dots += "🔴"
+		}
+	}
+	return nums + "\n" + dots
+}
+
+// hasRoundHistory: true si el set se reportó game a game (los reportes directos
+// con "Resultado final" no guardan secuencia).
+func hasRoundHistory(m *models.Matchmaking) bool {
+	var hist []int
+	if b := []byte(m.RoundHistory); len(b) > 0 {
+		if err := json.Unmarshal(b, &hist); err != nil {
+			hist = nil
+		}
+	}
+	return len(hist) > 0
 }
 
 // gamePanelEmbed: pips de victorias por jugador + tarjeta VS con el marcador
@@ -139,18 +189,19 @@ func gamePanelEmbed(m models.Matchmaking) (*discordgo.MessageEmbed, []*discordgo
 	files := []*discordgo.File{}
 
 	if m.P1TeamComplete() && m.P2TeamComplete() {
-		desc := fmt.Sprintf("%s %s\n%s %s\n",
-			m.Player1Tag, winPips(m.Score1, m.TargetFT, "🟩", "⬜"),
-			m.Player2Tag, winPips(m.Score2, m.TargetFT, "🟥", "⬜"))
 		info := fmt.Sprintf("FT %d · 💰 %d pts", m.TargetFT, m.PointsAtStake)
 		if m.RoomCode != "" {
 			info += " · 🏠 `" + m.RoomCode + "`"
 		}
-		embed.Description = desc + info
+		// Secuencia única de games: 1️⃣2️⃣3️⃣4️⃣5️⃣ / 🟢🔴🔴🟢⚪ (verde = ganó P1,
+		// el jugador destacado del panel; la leyenda va en el footer).
+		embed.Description = roundTrack(m, "p1") + "\n" + info
+		embed.Footer = &discordgo.MessageEmbedFooter{
+			Text: fmt.Sprintf("🟢 gana %s · 🔴 gana %s", m.Player1Tag, m.Player2Tag),
+		}
 
-		// Tarjeta VS: champions de ambos + marcador pixel-art verde al centro
-		// (verde = set "en juego"; el dorado queda para la victoria final).
-		if card := matchCard(m, color.RGBA{0x58, 0x65, 0xF2, 0xFF}, color.RGBA{0x57, 0xF2, 0x87, 0xFF}, m.Score1, m.Score2, "match.png"); card != nil {
+		// Tarjeta VS: champions de ambos + marcador pixel-art al centro.
+		if card := matchCard(m, m.Score1, m.Score2, "match.png"); card != nil {
 			embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://match.png"}
 			files = append(files, card)
 		}
@@ -239,17 +290,17 @@ func loadIconCell(kind, id string, size int) image.Image {
 	return dst
 }
 
-// drawCardBackground pinta fondo degradado oscuro + esquinas redondeadas + marco
-// del color de acento. Lo comparten el banner de equipo y la tarjeta VS.
-func drawCardBackground(dst *image.RGBA, accent color.RGBA) {
+// drawCardBackground pinta fondo + esquinas redondeadas + marco del color de
+// acento. Lo comparten el banner de equipo (degradado oscuro) y la tarjeta VS
+// (fondo negro). bgTop→bgBottom define el degradado vertical (iguales = plano).
+func drawCardBackground(dst *image.RGBA, accent color.RGBA, bgTop, bgBottom color.RGBA) {
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 	const (
 		radius = 24 // esquinas redondeadas
 		frame  = 3  // grosor del marco
 	)
-	top, bottom := color.RGBA{44, 49, 58, 255}, color.RGBA{20, 22, 26, 255}
 	for y := 0; y < h; y++ {
-		bg := lerpColor(top, bottom, float64(y)/float64(h-1))
+		bg := lerpColor(bgTop, bgBottom, float64(y)/float64(h-1))
 		for x := 0; x < w; x++ {
 			if !inRoundedRect(x, y, w, h, radius) {
 				continue // transparente: esquinas del PNG
@@ -281,7 +332,7 @@ func bannerV2(name string, accent color.RGBA, cells ...image.Image) *discordgo.F
 	)
 	w, h := pad*2+cell*len(valid), pad*2+cell
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	drawCardBackground(dst, accent)
+	drawCardBackground(dst, accent, color.RGBA{44, 49, 58, 255}, color.RGBA{20, 22, 26, 255})
 	for i, c := range valid {
 		b := c.Bounds()
 		x0 := pad + i*cell + (cell-b.Dx())/2
@@ -343,11 +394,18 @@ func drawScorePixels(dst *image.RGBA, cx, cy int, text string, maxW int, c color
 	}
 }
 
+// Colores del diseño "tester" de la tarjeta VS: fondo negro, borde morado
+// (blurple) y marcador verde.
+var (
+	cardPurple = color.RGBA{0x58, 0x65, 0xF2, 0xFF} // marco de la tarjeta VS
+	cardBlack  = color.RGBA{0x00, 0x00, 0x00, 0xFF} // fondo de la tarjeta VS
+	cardGreen  = color.RGBA{0x57, 0xF2, 0x87, 0xFF} // marcador pixel-art
+)
+
 // matchCard: tarjeta del enfrentamiento — champions de P1 (izquierda) vs
-// champions de P2 (derecha) y el marcador pixel-art al centro.
-// accent: color del marco; scoreColor: color del marcador (verde en el panel
-// de games "en juego", dorado en el reporte de victoria).
-func matchCard(m models.Matchmaking, accent color.RGBA, scoreColor color.Color, scoreL, scoreR int, name string) *discordgo.File {
+// champions de P2 (derecha) y el marcador pixel-art al centro. Fondo negro,
+// marco morado y score verde (diseño pedazo a pedido del equipo de testers).
+func matchCard(m models.Matchmaking, scoreL, scoreR int, name string) *discordgo.File {
 	const cell, pad = 120, 14
 	const scoreW = 150
 
@@ -366,7 +424,7 @@ func matchCard(m models.Matchmaking, accent color.RGBA, scoreColor color.Color, 
 
 	w, h := pad*2+cell*4+scoreW, pad*2+cell
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	drawCardBackground(dst, accent)
+	drawCardBackground(dst, cardPurple, cardBlack, cardBlack)
 
 	drawCell := func(img image.Image, xBase int) {
 		if img == nil {
@@ -384,7 +442,7 @@ func matchCard(m models.Matchmaking, accent color.RGBA, scoreColor color.Color, 
 
 	drawScorePixels(dst, pad+cell*2+scoreW/2, h/2,
 		fmt.Sprintf("%d-%d", scoreL, scoreR), scoreW-16,
-		scoreColor) // verde en games, dorado en el reporte
+		cardGreen)
 
 	var out bytes.Buffer
 	if err := png.Encode(&out, dst); err != nil {
@@ -1911,6 +1969,17 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 	}
 
 	desc := fmt.Sprintf("**%s %d — %d %s**\n", m.Player1Tag, m.Score1, m.Score2, m.Player2Tag)
+	// Secuencia de games desde la perspectiva del GANADOR (el autor del embed):
+	// solo si el set se reportó game a game (los "Resultado final" no tienen orden).
+	foot := "⚡ " + gamechars.TeamLabel(wc1, wc2, wfuse)
+	if hasRoundHistory(&m) {
+		ref := "p2"
+		if m.WinnerDiscordID == m.Player1DiscordID {
+			ref = "p1"
+		}
+		desc += roundTrack(m, ref) + "\n"
+		foot += " · 🟢 gana " + r.WinnerTag
+	}
 	desc += fmt.Sprintf("🏆 **%s** %s pts → **%d** · %s\n❌ %s %s pts → **%d** · %s",
 		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW),
 		r.LoserTag, signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL))
@@ -1931,14 +2000,13 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://fusion.png"}
 		files = append(files, f)
 	}
-	// Tarjeta VS con marco dorado: champions de ambos + marcador pixel-art
-	// dorado (la victoria es dorada; el verde queda para el set en juego).
-	if card := matchCard(m, color.RGBA{0xF0, 0xB2, 0x32, 0xFF}, color.RGBA{0xF0, 0xB2, 0x32, 0xFF}, m.Score1, m.Score2, "match.png"); card != nil {
+	// Tarjeta VS: champions de ambos + marcador pixel-art (negro/morado/verde).
+	if card := matchCard(m, m.Score1, m.Score2, "match.png"); card != nil {
 		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://match.png"}
 		files = append(files, card)
 	}
 	embed.Footer = &discordgo.MessageEmbedFooter{
-		Text: "⚡ " + gamechars.TeamLabel(wc1, wc2, wfuse),
+		Text: foot,
 	}
 
 	if _, err := s.ChannelMessageSendComplex(getMatchmakingResultChannelID(), &discordgo.MessageSend{
