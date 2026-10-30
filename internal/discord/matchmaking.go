@@ -184,7 +184,7 @@ func iconFile(kind, id string) *discordgo.File {
 		log.Printf("⚠️ No se pudo leer el icono %s: %v\n", path, err)
 		return nil
 	}
-	data = smallPNG(data, 128)
+	data = smallPNG(data, 512)
 	return &discordgo.File{Name: name, Reader: bytes.NewReader(data)}
 }
 
