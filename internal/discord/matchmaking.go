@@ -546,6 +546,17 @@ func iconFilePNG(name, kind, id string, size int) *discordgo.File {
 	return &discordgo.File{Name: name, Reader: bytes.NewReader(out.Bytes())}
 }
 
+// assetPNG lee un PNG estático del disco (p. ej. el "GG.png" del reporte) y lo
+// devuelve como adjunto de Discord (vía attachment://). nil si no existe.
+func assetPNG(path, name string) *discordgo.File {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("⚠️ No se pudo cargar %s: %v\n", path, err)
+		return nil
+	}
+	return &discordgo.File{Name: name, Reader: bytes.NewReader(data)}
+}
+
 // teamPanelEmbedWithBanner: la FUSIÓN vive en la miniatura del embed
 // (attachment://fusion.png) y el banner lleva SOLO los 2 champions.
 func teamPanelEmbedWithBanner(m models.Matchmaking, side string) (*discordgo.MessageEmbed, []*discordgo.File) {
@@ -1994,12 +2005,13 @@ func getLeaderTag(m models.Matchmaking) string {
 
 // sendMatchmakingReport publica el resultado en el canal de resultados.
 // Diseño "Matchup Card": tarjeta VS con los champions de ambos + marcador
-// pixel-art al centro; la fusión del ganador en la miniatura; puntos/ranking
-// en la descripción.
+// pixel-art al centro (perdedor en blanco y negro); el "GG" en la miniatura;
+// puntos/ranking en la descripción.
 func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 	m := r.Match
 
-	// Equipo del ganador (para el footer y la miniatura).
+	// Equipo del ganador (para el footer; la fusión queda como miniatura
+	// de fallback si falta el GG).
 	wc1, wc2, wfuse := m.P2Char1, m.P2Char2, m.P2Fuse
 	if m.WinnerDiscordID == m.Player1DiscordID {
 		wc1, wc2, wfuse = m.P1Char1, m.P1Char2, m.P1Fuse
@@ -2035,8 +2047,12 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 	}
 
 	files := []*discordgo.File{}
-	// Miniatura: la fusión del ganador (portada del equipo).
-	if f := iconFilePNG("fusion.png", "fuse", wfuse, 80); f != nil {
+	// Miniatura: el "GG" del cierre (pedido del equipo de testers, en vez de
+	// la fusión del ganador); si el archivo no está, se mantiene la fusión.
+	if f := assetPNG("GG.png", "gg.png"); f != nil {
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://gg.png"}
+		files = append(files, f)
+	} else if f := iconFilePNG("fusion.png", "fuse", wfuse, 80); f != nil {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://fusion.png"}
 		files = append(files, f)
 	}
