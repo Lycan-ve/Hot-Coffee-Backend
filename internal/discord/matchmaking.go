@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,92 @@ func editMessage(s *discordgo.Session, i *discordgo.InteractionCreate, content s
 	})
 	if err != nil {
 		log.Printf("❌ No se pudo editar el mensaje de la interacción: %v\n", err)
+	}
+}
+
+// iconFile lee un PNG de Personajes/ o Fusion/ y lo devuelve como adjunto de Discord.
+// kind: "char" (personaje) o "fuse" (fusión).
+func iconFile(kind, id string) *discordgo.File {
+	if id == "" {
+		return nil
+	}
+	var path, name string
+	if kind == "fuse" {
+		if !gamechars.ValidFuse(id) {
+			return nil
+		}
+		path, name = gamechars.FuseIcon(id), fmt.Sprintf("fuse_%s.png", id)
+	} else {
+		if !gamechars.ValidCharacter(id) {
+			return nil
+		}
+		path, name = gamechars.CharacterIcon(id), fmt.Sprintf("char_%s.png", id)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("⚠️ No se pudo leer el icono %s: %v\n", path, err)
+		return nil
+	}
+	return &discordgo.File{Name: name, Reader: bytes.NewReader(data)}
+}
+
+// teamPanelFiles: los PNG de los picks actuales (Personaje 1, Personaje 2 y Fusión).
+func teamPanelFiles(m models.Matchmaking, side string) []*discordgo.File {
+	c1, c2, fuse := m.P1Char1, m.P1Char2, m.P1Fuse
+	if side == "p2" {
+		c1, c2, fuse = m.P2Char1, m.P2Char2, m.P2Fuse
+	}
+	files := make([]*discordgo.File, 0, 3)
+	for _, f := range []*discordgo.File{iconFile("char", c1), iconFile("char", c2), iconFile("fuse", fuse)} {
+		if f != nil {
+			files = append(files, f)
+		}
+	}
+	return files
+}
+
+// editMessageFiles edita el mensaje de la interacción adjuntando archivos.
+// El slice vacío de Attachments REEMPLAZA las imágenes anteriores (sin acumular).
+func editMessageFiles(s *discordgo.Session, i *discordgo.InteractionCreate, content string, components []discordgo.MessageComponent, files []*discordgo.File) {
+	if components == nil {
+		components = []discordgo.MessageComponent{}
+	}
+	if files == nil {
+		files = []*discordgo.File{}
+	}
+	empty := []*discordgo.MessageAttachment{}
+	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content:     &content,
+		Components:  &components,
+		Files:       files,
+		Attachments: &empty,
+	})
+	if err != nil {
+		log.Printf("❌ No se pudo editar el mensaje de la interacción: %v\n", err)
+	}
+}
+
+// editThreadMessageFiles edita un mensaje fijo del hilo con adjuntos (fuera de una interacción).
+func editThreadMessageFiles(s *discordgo.Session, threadID, messageID, content string, components []discordgo.MessageComponent, files []*discordgo.File) {
+	if messageID == "" || threadID == "" {
+		return
+	}
+	if components == nil {
+		components = []discordgo.MessageComponent{}
+	}
+	if files == nil {
+		files = []*discordgo.File{}
+	}
+	empty := []*discordgo.MessageAttachment{}
+	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:     threadID,
+		ID:          messageID,
+		Content:     &content,
+		Components:  &components,
+		Files:       files,
+		Attachments: &empty,
+	}); err != nil {
+		log.Printf("❌ No se pudo editar el mensaje %s del hilo %s: %v\n", messageID, threadID, err)
 	}
 }
 
@@ -512,6 +599,11 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 			return userError{"⚠️ El set ya no está en curso."}
 		}
 
+		// Equipo ya confirmado: los menús quedaron ocultos; se ignoran clics de menús viejos.
+		if (side == "p1" && m.P1TeamComplete()) || (side == "p2" && m.P2TeamComplete()) {
+			return userError{"⚠️ Tu equipo ya está confirmado: la selección de personajes y fusión está cerrada."}
+		}
+
 		// Personaje 1 y Personaje 2 deben ser distintos.
 		if side == "p1" && ((kind == "c1" && v == m.P1Char2) || (kind == "c2" && v == m.P1Char1)) {
 			return userError{"⚠️ Ese ya es tu otro personaje: el **Personaje 1** y el **Personaje 2** deben ser distintos."}
@@ -541,8 +633,15 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 		return
 	}
 
-	// Refresca el panel de equipo de quien acaba de elegir.
-	editMessage(s, i, teamPanelContent(match, side), getPlayerTeamKeyboard(match, side))
+	// ¿El equipo de quien eligió quedó completo (2 personajes + fusión)?
+	teamComplete := (side == "p1" && match.P1TeamComplete()) || (side == "p2" && match.P2TeamComplete())
+
+	// Equipo completo → menús ocultos + imágenes; si falta algo, menús visibles + imágenes.
+	if teamComplete {
+		editMessageFiles(s, i, teamPanelContent(match, side), nil, teamPanelFiles(match, side))
+	} else {
+		editMessageFiles(s, i, teamPanelContent(match, side), getPlayerTeamKeyboard(match, side), teamPanelFiles(match, side))
+	}
 
 	// Ambos equipos completos → activa el panel de games (REPORT GAME 1).
 	if match.P1TeamComplete() && match.P2TeamComplete() {
@@ -580,6 +679,7 @@ func handleReportGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 		default:
 			return userError{"⚠️ Botón no válido."}
 		}
+		m.PendingReportedBy = user.ID
 		m.Status = statusPendingVerify
 		now := time.Now()
 		m.LastRoundAt = &now // actividad: reinicia el reloj de inactividad (2 h)
@@ -606,6 +706,10 @@ func handleVerifyGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 		if m.Status != statusPendingVerify {
 			return userError{"⚠️ No hay ningún game esperando verificación."}
 		}
+		// Quien reportó el game SOLO espera: la confirmación es del otro jugador.
+		if m.PendingReportedBy != "" && user.ID == m.PendingReportedBy {
+			return userError{fmt.Sprintf("⏳ Tú ya reportaste este game: espera la confirmación de **%s**.", pendingConfirmerTag(m))}
+		}
 
 		// El game queda REGISTRADO: historial + marcador.
 		appendRound(m, fmt.Sprintf("p%d", m.PendingGameWinner))
@@ -615,6 +719,7 @@ func handleVerifyGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 			m.Score2++
 		}
 		m.PendingGameWinner = 0
+		m.PendingReportedBy = ""
 		now := time.Now()
 		m.LastRoundAt = &now
 
@@ -676,8 +781,13 @@ func handleCorrectReport(s *discordgo.Session, i *discordgo.InteractionCreate, d
 		if m.Status != statusPendingVerify {
 			return userError{"⚠️ No hay ningún reporte pendiente de verificación."}
 		}
+		// Quien reportó el game SOLO espera: la confirmación es del otro jugador.
+		if m.PendingReportedBy != "" && user.ID == m.PendingReportedBy {
+			return userError{fmt.Sprintf("⏳ Tú ya reportaste este game: espera la confirmación de **%s**.", pendingConfirmerTag(m))}
+		}
 		m.Status = statusInProgress
 		m.PendingGameWinner = 0
+		m.PendingReportedBy = ""
 		return nil
 	})
 	if err != nil {
@@ -704,6 +814,7 @@ func handleReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.
 		m.Score1, m.Score2 = 0, 0
 		m.RoundHistory = "[]"
 		m.PendingGameWinner = 0
+		m.PendingReportedBy = ""
 		m.WinnerDiscordID, m.LoserDiscordID = "", ""
 		m.Status = statusInProgress
 		m.CloseRequestedAt = nil
@@ -723,8 +834,8 @@ func handleReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.
 	// Vuelve a armar equipos: se restauran los menús de ambos paneles de equipo
 	// y el panel de games queda esperando de nuevo.
 	editMessage(s, i, "🔄 **SET REINICIADO:** armen de nuevo sus equipos en sus paneles. El **GAME 1** aparecerá aquí cuando ambos estén completos.", nil)
-	editThreadMessage(s, match.ThreadID, match.TeamPanelMessageID1, teamPanelContent(match, "p1"), getPlayerTeamKeyboard(match, "p1"))
-	editThreadMessage(s, match.ThreadID, match.TeamPanelMessageID2, teamPanelContent(match, "p2"), getPlayerTeamKeyboard(match, "p2"))
+	editThreadMessageFiles(s, match.ThreadID, match.TeamPanelMessageID1, teamPanelContent(match, "p1"), getPlayerTeamKeyboard(match, "p1"), nil)
+	editThreadMessageFiles(s, match.ThreadID, match.TeamPanelMessageID2, teamPanelContent(match, "p2"), getPlayerTeamKeyboard(match, "p2"), nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,8 +1230,10 @@ func getCloseKeyboard(matchID uint) discordgo.ActionsRow {
 // teamPanelContent: panel de equipo de un jugador (personaje 1, personaje 2 y fusión).
 func teamPanelContent(m models.Matchmaking, side string) string {
 	tag, c1, c2, fuse := m.Player1Tag, m.P1Char1, m.P1Char2, m.P1Fuse
+	complete := m.P1TeamComplete()
 	if side == "p2" {
 		tag, c1, c2, fuse = m.Player2Tag, m.P2Char1, m.P2Char2, m.P2Fuse
+		complete = m.P2TeamComplete()
 	}
 	pick := func(id string) string {
 		if n := gamechars.CharacterName(id); n != "" {
@@ -1132,11 +1245,20 @@ func teamPanelContent(m models.Matchmaking, side string) string {
 	if n := gamechars.FuseName(fuse); n != "" {
 		f = n
 	}
+	if complete {
+		return fmt.Sprintf("🔒 **EQUIPO DE %s** — CONFIRMADO (FT %d)\n"+
+			"🎮 **Personaje 1:** %s\n"+
+			"🎮 **Personaje 2:** %s\n"+
+			"🔀 **Fusión:** %s\n\n"+
+			"✅ Equipo cerrado: la selección de personajes y fusión quedó oculta.\n"+
+			"¿Error? Usa **⏪ Reiniciar / Corregir** en el panel de games para re-armar los equipos.",
+			tag, m.TargetFT, pick(c1), pick(c2), f)
+	}
 	return fmt.Sprintf("🧑‍🤝‍🧑 **EQUIPO DE %s** — FT %d\n"+
 		"🎮 **Personaje 1:** %s\n"+
 		"🎮 **Personaje 2:** %s\n"+
 		"🔀 **Fusión:** %s\n\n"+
-		"Elige tu **Personaje 1**, tu **Personaje 2** (distinto) y tu **Fusión** en los menús.",
+		"Elige tu **Personaje 1**, tu **Personaje 2** (distinto) y tu **Fusión** en los menús. Se ocultan al confirmar los 3.",
 		tag, m.TargetFT, pick(c1), pick(c2), f)
 }
 
@@ -1164,9 +1286,26 @@ func verificationPanelContent(m models.Matchmaking) string {
 	}
 	return fmt.Sprintf("🔍 **RESULT VERIFICATION — GAME %d**\n"+
 		"game %d: **%s** %s **%s**\n\n"+
-		"✅ **Cualquiera de los dos puede verificar** (incluido quien reportó).\n"+
-		"✏️ ¿Reporte equivocado? **Corregir Reporte** re-anota el game sin castigo.",
-		gameN, gameN, m.Player1Tag, res, m.Player2Tag)
+		"⏳ **%s** ya reportó: solo falta que **%s** presione **✅ Verify Result Submission**.\n"+
+		"✏️ ¿Reporte equivocado? **%s** puede presionar **Corregir Reporte** para re-anotar el game sin castigo.",
+		gameN, gameN, m.Player1Tag, res, m.Player2Tag,
+		pendingReporterTag(&m), pendingConfirmerTag(&m), pendingConfirmerTag(&m))
+}
+
+// pendingReporterTag / pendingConfirmerTag: quién reportó el game pendiente
+// y quién debe confirmarlo (el otro jugador).
+func pendingReporterTag(m *models.Matchmaking) string {
+	if m.PendingReportedBy == m.Player1DiscordID {
+		return m.Player1Tag
+	}
+	return m.Player2Tag
+}
+
+func pendingConfirmerTag(m *models.Matchmaking) string {
+	if m.PendingReportedBy == m.Player1DiscordID {
+		return m.Player2Tag
+	}
+	return m.Player1Tag
 }
 
 // historyBlock construye el resumen del set con el ORDEN de las victorias:

@@ -20,7 +20,7 @@ var Characters = []Character{
 	{"Braum", "Braum"}, {"Caitlyn", "Caitlyn"}, {"Darius", "Darius"},
 	{"Ekko", "Ekko"}, {"Illaoi", "Illaoi"}, {"Jinx", "Jinx"}, {"Lux", "Lux"},
 	{"Senna", "Senna"}, {"Teemo", "Teemo"}, {"Thresh", "Thresh"}, {"Vi", "Vi"},
-	{"Warwick", "Warwick"}, {"Yasuo", "Yasuo"},
+	{"Warwick", "Warwick"}, {"Yasuo", "Yasuo"}, {"Sett", "Sett"}, {"Samira", "Samira"},
 }
 
 var Fuses = []Fuse{

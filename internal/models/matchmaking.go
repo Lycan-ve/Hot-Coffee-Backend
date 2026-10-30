@@ -39,6 +39,8 @@ type Matchmaking struct {
 	RoundHistory string `json:"round_history"`
 	// Game reportado esperando verificación (1 = ganó Player1, 2 = Player2, 0 = ninguno).
 	PendingGameWinner int `json:"pending_game_winner"`
+	// Quién reportó el game pendiente: SOLO el otro jugador puede confirmarlo.
+	PendingReportedBy string `json:"pending_reported_by"`
 	// Relojes del janitor (en la BD: sobreviven reinicios del bot).
 	CloseRequestedAt *time.Time `json:"close_requested_at"` // propuesta de cierre: se cierra a los 2 min
 	CloseRequestedBy string     `json:"close_requested_by"` // quién pidió cerrar el set
