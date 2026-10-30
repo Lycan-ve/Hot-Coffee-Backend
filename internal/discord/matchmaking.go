@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"log"
 	"os"
@@ -120,14 +121,19 @@ func gamePanelEmbed(m models.Matchmaking) *discordgo.MessageEmbed {
 	desc := fmt.Sprintf("**%s** `%d — %d` **%s**\n", m.Player1Tag, m.Score1, m.Score2, m.Player2Tag)
 
 	if m.P1TeamComplete() && m.P2TeamComplete() {
-		info := "games `" + reportSequence(&m) + "`"
-		if reportSequence(&m) == "" {
-			info = "games — *(reporte directo)*"
+		info := ""
+		if seq := reportSequence(&m); seq != "" {
+			info = "games `" + seq + "`"
 		}
 		if m.RoomCode != "" {
-			info += " · 🏠 `" + m.RoomCode + "`"
+			if info != "" {
+				info += " · "
+			}
+			info += "🏠 `" + m.RoomCode + "`"
 		}
-		desc += info
+		if info != "" {
+			desc += info
+		}
 	} else {
 		desc += "⏳ Armen sus equipos en los paneles de arriba"
 	}
@@ -163,91 +169,105 @@ func refreshGamePanel(s *discordgo.Session, i *discordgo.InteractionCreate, pref
 
 // iconFile lee un PNG de Personajes/ o Fusion/ y lo devuelve como adjunto de Discord.
 // kind: "char" (personaje) o "fuse" (fusión).
-func iconFile(kind, id string) *discordgo.File {
+// loadIconCell carga un PNG de Personajes/ o Fusion/ y lo reescala (factor ENTERO,
+// vecino más cercano: pixel art nítido) para que quepa en un cuadro de size px.
+// Devuelve nil si el icono no existe o falla.
+func loadIconCell(kind, id string, size int) image.Image {
 	if id == "" {
 		return nil
 	}
-	var path, name string
+	var path string
 	if kind == "fuse" {
 		if !gamechars.ValidFuse(id) {
 			return nil
 		}
-		path, name = gamechars.FuseIcon(id), fmt.Sprintf("fuse_%s.png", id)
+		path = gamechars.FuseIcon(id)
 	} else {
 		if !gamechars.ValidCharacter(id) {
 			return nil
 		}
-		path, name = gamechars.CharacterIcon(id), fmt.Sprintf("char_%s.png", id)
+		path = gamechars.CharacterIcon(id)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		log.Printf("⚠️ No se pudo leer el icono %s: %v\n", path, err)
 		return nil
 	}
-	data = smallPNG(data, 512)
-	return &discordgo.File{Name: name, Reader: bytes.NewReader(data)}
-}
-
-// smallPNG reescala un PNG SOLO si es más grande que size px por lado.
-// Discord muestra los adjuntos a ~400-500 px de ancho: mandar un PNG de 128 px
-// hace que Discord lo agrande al mostrarlo y el pixel art quede destruido.
-// Usa factor de reducción ENTERO con vecino más cercano (solo stdlib): cada
-// pixel de salida cubre exactamente k×k pixels de origen, así el pixel art
-// se ve nítido y con píxeles parejos. Si falla, devuelve el original.
-func smallPNG(data []byte, size int) []byte {
 	src, err := png.Decode(bytes.NewReader(data))
 	if err != nil {
-		return data
+		log.Printf("⚠️ PNG inválido: %s: %v\n", path, err)
+		return nil
 	}
 	b := src.Bounds()
-	if b.Dx() <= size && b.Dy() <= size {
-		return data // ya está en tamaño de sobra: no se toca
-	}
-
-	// Factor entero k = ceil(ladoMayor / size): p. ej. 793 px con size=512 → k=2.
 	k := b.Dx()
 	if b.Dy() > k {
 		k = b.Dy()
 	}
 	k = (k + size - 1) / size
-	if k < 2 {
-		return data
+	if k < 1 {
+		k = 1
 	}
-
-	dw := b.Dx() / k
-	dh := b.Dy() / k
+	dw, dh := b.Dx()/k, b.Dy()/k
 	if dw < 1 || dh < 1 {
-		return data
+		return nil
 	}
-
 	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
 	for y := 0; y < dh; y++ {
-		sy := b.Min.Y + y*k + k/2 // centro del bloque k×k
+		sy := b.Min.Y + y*k + k/2
 		for x := 0; x < dw; x++ {
 			sx := b.Min.X + x*k + k/2
 			dst.Set(x, y, src.At(sx, sy))
 		}
 	}
-	var out bytes.Buffer
-	if err := png.Encode(&out, dst); err != nil {
-		return data
-	}
-	return out.Bytes()
+	return dst
 }
 
-// teamPanelFiles: los PNG de los picks actuales (Personaje 1, Personaje 2 y Fusión).
-func teamPanelFiles(m models.Matchmaking, side string) []*discordgo.File {
+// teamBannerFile compone los iconos (fusión → champ → champ) en UNA sola imagen
+// horizontal con celdas de 128 px sobre fondo transparente. Se referencia desde
+// el embed con attachment://team_banner.png — así las imágenes viven DENTRO del
+// embed y Discord no las tira arriba del mensaje. Devuelve nil si no hay iconos.
+func teamBannerFile(cells ...image.Image) *discordgo.File {
+	valid := make([]image.Image, 0, len(cells))
+	for _, c := range cells {
+		if c != nil {
+			valid = append(valid, c)
+		}
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	const cell = 128
+	canvas := image.NewRGBA(image.Rect(0, 0, cell*len(valid), cell))
+	for idx, c := range valid {
+		b := c.Bounds()
+		x0 := idx*cell + (cell-b.Dx())/2
+		y0 := (cell - b.Dy()) / 2
+		draw.Draw(canvas, image.Rect(x0, y0, x0+b.Dx(), y0+b.Dy()), c, b.Min, draw.Over)
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, canvas); err != nil {
+		log.Printf("⚠️ No se pudo codificar el banner del equipo: %v\n", err)
+		return nil
+	}
+	return &discordgo.File{Name: "team_banner.png", Reader: bytes.NewReader(out.Bytes())}
+}
+
+// teamPanelEmbedWithBanner construye la ficha del jugador y, si hay picks, mete
+// el banner fusión → champ → champ dentro del embed.
+func teamPanelEmbedWithBanner(m models.Matchmaking, side string) (*discordgo.MessageEmbed, []*discordgo.File) {
+	embed := teamPanelEmbed(m, side)
 	c1, c2, fuse := m.P1Char1, m.P1Char2, m.P1Fuse
 	if side == "p2" {
 		c1, c2, fuse = m.P2Char1, m.P2Char2, m.P2Fuse
 	}
-	files := make([]*discordgo.File, 0, 3)
-	for _, f := range []*discordgo.File{iconFile("fuse", fuse), iconFile("char", c1), iconFile("char", c2)} {
-		if f != nil {
-			files = append(files, f)
-		}
+	if banner := teamBannerFile(
+		loadIconCell("fuse", fuse, 128),
+		loadIconCell("char", c1, 128),
+		loadIconCell("char", c2, 128)); banner != nil {
+		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://team_banner.png"}
+		return embed, []*discordgo.File{banner}
 	}
-	return files
+	return embed, nil
 }
 
 // editMessageEmbedFiles edita el mensaje de la interacción con un embed,
@@ -312,24 +332,6 @@ func withMatch(db *gorm.DB, matchID uint64, fn func(tx *gorm.DB, m *models.Match
 		return tx.Save(&match).Error
 	})
 	return match, err
-}
-
-// editThreadMessage edita un mensaje fijo del hilo fuera de una interacción.
-func editThreadMessage(s *discordgo.Session, threadID, messageID, content string, components []discordgo.MessageComponent) {
-	if messageID == "" || threadID == "" {
-		return
-	}
-	if components == nil {
-		components = []discordgo.MessageComponent{}
-	}
-	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
-		Channel:    threadID,
-		ID:         messageID,
-		Content:    &content,
-		Components: &components,
-	}); err != nil {
-		log.Printf("❌ No se pudo editar el mensaje %s del hilo %s: %v\n", messageID, threadID, err)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -580,14 +582,17 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 		return
 	}
 
-	// Paneles del hilo: EQUIPO por jugador (Personaje 1, Personaje 2, Fusión)
+	p1Embed, p1Files := teamPanelEmbedWithBanner(match, "p1")
 	teamP1, err1 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Embeds:     []*discordgo.MessageEmbed{teamPanelEmbed(match, "p1")},
+		Embeds:     []*discordgo.MessageEmbed{p1Embed},
 		Components: getPlayerTeamKeyboard(match, "p1"),
+		Files:      p1Files,
 	})
+	p2Embed, p2Files := teamPanelEmbedWithBanner(match, "p2")
 	teamP2, err2 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Embeds:     []*discordgo.MessageEmbed{teamPanelEmbed(match, "p2")},
+		Embeds:     []*discordgo.MessageEmbed{p2Embed},
 		Components: getPlayerTeamKeyboard(match, "p2"),
+		Files:      p2Files,
 	})
 
 	gamePanel, err3 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
@@ -717,17 +722,37 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 	// ¿El equipo de quien eligió quedó completo (2 personajes + fusión)?
 	teamComplete := (side == "p1" && match.P1TeamComplete()) || (side == "p2" && match.P2TeamComplete())
 
-	// Ficha actualizada: embed + imágenes; los menús solo si falta algo por elegir.
+	// Ficha actualizada con banner dentro del embed; menús solo si falta algo.
+	embed, files := teamPanelEmbedWithBanner(match, side)
 	if teamComplete {
-		editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), nil, teamPanelFiles(match, side))
+		editMessageEmbedFiles(s, i, embed, nil, files)
 	} else {
-		editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), getPlayerTeamKeyboard(match, side), teamPanelFiles(match, side))
+		editMessageEmbedFiles(s, i, embed, getPlayerTeamKeyboard(match, side), files)
 	}
 
-	// Ambos equipos completos → activa el panel de games (REPORT GAME 1).
+	// Ambos equipos completos → activa el panel de games (embed VS + botones W).
 	if match.P1TeamComplete() && match.P2TeamComplete() {
-		editThreadMessage(s, match.ThreadID, match.PanelMessageID, gamePanelContent(match),
-			getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag))
+		refreshGamePanelThread(s, match)
+	}
+}
+
+// refreshGamePanelThread actualiza el panel de games del hilo sin interacción
+// (p. ej. al completarse ambos equipos).
+func refreshGamePanelThread(s *discordgo.Session, m models.Matchmaking) {
+	if m.ThreadID == "" || m.PanelMessageID == "" {
+		return
+	}
+	embeds := []*discordgo.MessageEmbed{gamePanelEmbed(m)}
+	components := getGameKeyboard(m.ID, m.Player1Tag, m.Player2Tag)
+	empty := ""
+	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:    m.ThreadID,
+		ID:         m.PanelMessageID,
+		Content:    &empty,
+		Embeds:     &embeds,
+		Components: &components,
+	}); err != nil {
+		log.Printf("❌ No se pudo actualizar el panel de games del hilo: %v\n", err)
 	}
 }
 
@@ -869,8 +894,20 @@ func handleCloseSet(s *discordgo.Session, i *discordgo.InteractionCreate, db *go
 		if m.Status == statusPendingClose {
 			return userError{"⚠️ Ya hay una propuesta de cierre en curso."}
 		}
+		// Sets viejos atascados en PENDING_VERIFY: se absorbe el game pendiente
+		// (mismo criterio que al reportar con W) y se permite cerrar el set.
 		if m.Status == statusPendingVerify {
-			return userError{"⚠️ Hay un game esperando verificación: verifícalo o corrígelo antes de cerrar el set."}
+			if m.PendingGameWinner == 1 || m.PendingGameWinner == 2 {
+				appendRound(m, fmt.Sprintf("p%d", m.PendingGameWinner))
+				if m.PendingGameWinner == 1 {
+					m.Score1++
+				} else {
+					m.Score2++
+				}
+			}
+			m.PendingGameWinner = 0
+			m.PendingReportedBy = ""
+			m.Status = statusInProgress
 		}
 		if m.Status != statusInProgress {
 			return userError{"⚠️ Este set no está en curso."}
@@ -1129,8 +1166,6 @@ func finishWithLeader(tx *gorm.DB, m *models.Matchmaking) (matchReport, bool, er
 // getPlayerTeamKeyboard: menús del equipo de UN jugador (personaje 1, personaje 2 y fusión).
 func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.MessageComponent {
 	one := 1
-	if side == "p2" {
-	}
 
 	charOpts := make([]discordgo.SelectMenuOption, 0, len(gamechars.Characters))
 	for _, c := range gamechars.Characters {
@@ -1308,21 +1343,6 @@ func teamPanelEmbed(m models.Matchmaking, side string) *discordgo.MessageEmbed {
 	return embed
 }
 
-// gamePanelContent: panel de reporte del game N (estilo start.gg).
-func gamePanelContent(m models.Matchmaking) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "⚔️ **%s vs %s** — FT %d · 💰 %d pts · **%d - %d**\n",
-		m.Player1Tag, m.Player2Tag, m.TargetFT, m.PointsAtStake, m.Score1, m.Score2)
-	if m.RoomCode != "" {
-		fmt.Fprintf(&sb, "🏠 `%s`\n", m.RoomCode)
-	}
-	if seq := gameSequence(&m); seq != "" {
-		fmt.Fprintf(&sb, "%s\n", seq)
-	}
-	fmt.Fprintf(&sb, "GAME %d — **W** del ganador · ✏️ Corregir deshace el último", m.Score1+m.Score2+1)
-	return sb.String()
-}
-
 // historyBlock construye el resumen del set con el ORDEN de las victorias:
 //
 //	game 1: **A** W - L **B**
@@ -1370,24 +1390,6 @@ func fullSetPanelContent(m models.Matchmaking) string {
 		m.TargetFT, m.Player1Tag, p1, m.Player2Tag, p2, m.TargetFT)
 }
 
-// gameSequence: "games `1-2-1`" — quién ganó cada game (1 o 2), en una línea.
-func gameSequence(m *models.Matchmaking) string {
-	var hist []int
-	if b := []byte(m.RoundHistory); len(b) > 0 {
-		if err := json.Unmarshal(b, &hist); err != nil {
-			hist = nil
-		}
-	}
-	if len(hist) == 0 {
-		return ""
-	}
-	parts := make([]string, len(hist))
-	for idx, h := range hist {
-		parts[idx] = strconv.Itoa(h)
-	}
-	return "games `" + strings.Join(parts, "-") + "`"
-}
-
 // publishFinished muestra el resultado del set terminado y limpia el hilo.
 func publishFinished(s *discordgo.Session, i *discordgo.InteractionCreate, r matchReport) {
 	editMessage(s, i, fmt.Sprintf(
@@ -1420,13 +1422,6 @@ func appendRound(m *models.Matchmaking, side string) {
 // getLeaderTag devuelve el tag de quien va ganando el marcador.
 func getLeaderTag(m models.Matchmaking) string {
 	if m.Score1 > m.Score2 {
-		return m.Player1Tag
-	}
-	return m.Player2Tag
-}
-
-func getWinnerTag(m models.Matchmaking) string {
-	if m.WinnerDiscordID == m.Player1DiscordID {
 		return m.Player1Tag
 	}
 	return m.Player2Tag
@@ -1480,23 +1475,23 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 		},
 	}
 
-	// PNGs del equipo ganador: fusión → champ 1 → champ 2 (128px, reescalados).
-	files := winnerSideFiles(&m)
-	fuseIncluded := false
-	fuseName := fmt.Sprintf("fuse_%s.png", wfuse)
-	for _, f := range files {
-		if f.Name == fuseName {
-			fuseIncluded = true
-			break
-		}
+	// Banner del equipo ganador DENTRO del embed (fusión → champ → champ).
+	files := []*discordgo.File{}
+	if banner := teamBannerFile(
+		loadIconCell("fuse", wfuse, 128),
+		loadIconCell("char", wc1, 128),
+		loadIconCell("char", wc2, 128)); banner != nil {
+		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://team_banner.png"}
+		files = append(files, banner)
 	}
 
-	// Footer con el equipo ganador; la fusión como icono (solo si el PNG se adjuntó).
+	// Footer: equipo ganador; el avatar del ganador como icono (URL, sin adjunto).
+	_, wAvatar := sideInfo(&m, m.WinnerDiscordID)
 	embed.Footer = &discordgo.MessageEmbedFooter{
 		Text: "🏆 Equipo ganador · " + gamechars.TeamLabel(wc1, wc2, wfuse),
 	}
-	if fuseIncluded {
-		embed.Footer.IconURL = "attachment://" + fuseName
+	if wAvatar != "" {
+		embed.Footer.IconURL = wAvatar
 	}
 
 	if _, err := s.ChannelMessageSendComplex(getMatchmakingResultChannelID(), &discordgo.MessageSend{
@@ -1505,21 +1500,6 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 	}); err != nil {
 		log.Printf("❌ No se pudo publicar el reporte de matchmaking: %v\n", err)
 	}
-}
-
-// winnerSideFiles: los PNGs del equipo ganador (fusión → champ → champ) para el reporte.
-func winnerSideFiles(m *models.Matchmaking) []*discordgo.File {
-	c1, c2, fuse := m.P2Char1, m.P2Char2, m.P2Fuse
-	if m.WinnerDiscordID == m.Player1DiscordID {
-		c1, c2, fuse = m.P1Char1, m.P1Char2, m.P1Fuse
-	}
-	files := make([]*discordgo.File, 0, 3)
-	for _, f := range []*discordgo.File{iconFile("fuse", fuse), iconFile("char", c1), iconFile("char", c2)} {
-		if f != nil {
-			files = append(files, f)
-		}
-	}
-	return files
 }
 
 // reportSequence: "2-2-2" — quién ganó cada game (1 = P1, 2 = P2); "" si no hay historial.
@@ -1557,15 +1537,6 @@ func signed(n int) string {
 		return "±0"
 	}
 	return fmt.Sprintf("%+d", n)
-}
-
-func formatRankChange(oldRank, newRank int) string {
-	if oldRank > newRank {
-		return fmt.Sprintf("▲ Ascendió %d pos.", oldRank-newRank)
-	} else if oldRank < newRank {
-		return fmt.Sprintf("▼ Descendió %d pos.", newRank-oldRank)
-	}
-	return "➡️ Se mantiene"
 }
 
 // RESULTADO FINAL: reportar todo el set con 2 dropdowns (0..FT).
