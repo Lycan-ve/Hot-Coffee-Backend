@@ -391,7 +391,7 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		}
 	}
 
-	if author.ID == rival.ID {
+	if author.ID == rival.ID && os.Getenv("MATCHMAKING_SELF_TEST") != "1" {
 		reply("❌ No puedes retarte a ti mismo.")
 		return
 	}
