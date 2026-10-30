@@ -2018,7 +2018,9 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 		foot += " · 🟢 gana " + r.WinnerTag
 	}
 	// Salto de línea extra: separa el marcador/bolitas del bloque de puntos.
-	desc += "\n" + fmt.Sprintf("🏆 **%s** %s pts → **%d** · %s\n❌ %s %s pts → **%d** · %s",
+	// Etiquetas del equipo de testers: 😎 WINS para el ganador, 😵 LOSES para
+	// el perdedor (antes 🏆/❌).
+	desc += "\n" + fmt.Sprintf("😎 **WINS** · **%s** %s pts → **%d** · %s\n😵 **LOSES** · %s %s pts → **%d** · %s",
 		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW),
 		r.LoserTag, signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL))
 
