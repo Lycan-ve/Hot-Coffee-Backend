@@ -188,8 +188,12 @@ func iconFile(kind, id string) *discordgo.File {
 	return &discordgo.File{Name: name, Reader: bytes.NewReader(data)}
 }
 
-// smallPNG reescala un PNG para que se vea pequeño en Discord (máx. size px por lado).
-// Vecino más cercano con solo stdlib; si falla, devuelve el original.
+// smallPNG reescala un PNG SOLO si es más grande que size px por lado.
+// Discord muestra los adjuntos a ~400-500 px de ancho: mandar un PNG de 128 px
+// hace que Discord lo agrande al mostrarlo y el pixel art quede destruido.
+// Usa factor de reducción ENTERO con vecino más cercano (solo stdlib): cada
+// pixel de salida cubre exactamente k×k pixels de origen, así el pixel art
+// se ve nítido y con píxeles parejos. Si falla, devuelve el original.
 func smallPNG(data []byte, size int) []byte {
 	src, err := png.Decode(bytes.NewReader(data))
 	if err != nil {
@@ -197,25 +201,30 @@ func smallPNG(data []byte, size int) []byte {
 	}
 	b := src.Bounds()
 	if b.Dx() <= size && b.Dy() <= size {
+		return data // ya está en tamaño de sobra: no se toca
+	}
+
+	// Factor entero k = ceil(ladoMayor / size): p. ej. 793 px con size=512 → k=2.
+	k := b.Dx()
+	if b.Dy() > k {
+		k = b.Dy()
+	}
+	k = (k + size - 1) / size
+	if k < 2 {
 		return data
 	}
-	maxDim := b.Dx()
-	if b.Dy() > maxDim {
-		maxDim = b.Dy()
+
+	dw := b.Dx() / k
+	dh := b.Dy() / k
+	if dw < 1 || dh < 1 {
+		return data
 	}
-	dw := b.Dx() * size / maxDim
-	if dw < 1 {
-		dw = 1
-	}
-	dh := b.Dy() * size / maxDim
-	if dh < 1 {
-		dh = 1
-	}
+
 	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
 	for y := 0; y < dh; y++ {
-		sy := b.Min.Y + y*b.Dy()/dh
+		sy := b.Min.Y + y*k + k/2 // centro del bloque k×k
 		for x := 0; x < dw; x++ {
-			sx := b.Min.X + x*b.Dx()/dw
+			sx := b.Min.X + x*k + k/2
 			dst.Set(x, y, src.At(sx, sy))
 		}
 	}
