@@ -150,12 +150,12 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	startgg.SyncTournamentsFromDiscordJSON("Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json", startGGToken, db, activeMembers)
 
 	// [COMENTADO] Sincronización en vivo desde Discord (deshabilitada temporalmente)
-	discordTournaments, _ := discord.FetchTournamentsFromDiscord()
-	if len(discordTournaments) > 0 && dgSession != nil {
-		guildID := os.Getenv("DISCORD_GUILD_ID")
-		activeMembersLive := discord.GetGuildMembersMap(dgSession, guildID)
-		startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembersLive)
-	}
+	// discordTournaments, _ := discord.FetchTournamentsFromDiscord()
+	// if len(discordTournaments) > 0 && dgSession != nil {
+	// 	guildID := os.Getenv("DISCORD_GUILD_ID")
+	// 	activeMembersLive := discord.GetGuildMembersMap(dgSession, guildID)
+	// 	startgg.SyncTournamentsFromDiscordLive(discordTournaments, startGGToken, db, activeMembersLive)
+	// }
 
 	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
 	startgg.SyncManualTournaments(db, activeMembers)
