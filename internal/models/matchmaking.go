@@ -41,6 +41,9 @@ type Matchmaking struct {
 	PendingGameWinner int `json:"pending_game_winner"`
 	// Quién reportó el game pendiente: SOLO el otro jugador puede confirmarlo.
 	PendingReportedBy string `json:"pending_reported_by"`
+	// Reporte del set completo con 2 dropdowns (games finales elegidos; -1 = sin elegir).
+	FinalPick1 int `json:"final_pick_1"`
+	FinalPick2 int `json:"final_pick_2"`
 	// Relojes del janitor (en la BD: sobreviven reinicios del bot).
 	CloseRequestedAt *time.Time `json:"close_requested_at"` // propuesta de cierre: se cierra a los 2 min
 	CloseRequestedBy string     `json:"close_requested_by"` // quién pidió cerrar el set

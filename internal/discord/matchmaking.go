@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"log"
 	"os"
 	"strconv"
@@ -130,7 +132,46 @@ func iconFile(kind, id string) *discordgo.File {
 		log.Printf("⚠️ No se pudo leer el icono %s: %v\n", path, err)
 		return nil
 	}
+	data = smallPNG(data, 128)
 	return &discordgo.File{Name: name, Reader: bytes.NewReader(data)}
+}
+
+// smallPNG reescala un PNG para que se vea pequeño en Discord (máx. size px por lado).
+// Vecino más cercano con solo stdlib; si falla, devuelve el original.
+func smallPNG(data []byte, size int) []byte {
+	src, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return data
+	}
+	b := src.Bounds()
+	if b.Dx() <= size && b.Dy() <= size {
+		return data
+	}
+	maxDim := b.Dx()
+	if b.Dy() > maxDim {
+		maxDim = b.Dy()
+	}
+	dw := b.Dx() * size / maxDim
+	if dw < 1 {
+		dw = 1
+	}
+	dh := b.Dy() * size / maxDim
+	if dh < 1 {
+		dh = 1
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for y := 0; y < dh; y++ {
+		sy := b.Min.Y + y*b.Dy()/dh
+		for x := 0; x < dw; x++ {
+			sx := b.Min.X + x*b.Dx()/dw
+			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, dst); err != nil {
+		return data
+	}
+	return out.Bytes()
 }
 
 // teamPanelFiles: los PNG de los picks actuales (Personaje 1, Personaje 2 y Fusión).
@@ -140,7 +181,7 @@ func teamPanelFiles(m models.Matchmaking, side string) []*discordgo.File {
 		c1, c2, fuse = m.P2Char1, m.P2Char2, m.P2Fuse
 	}
 	files := make([]*discordgo.File, 0, 3)
-	for _, f := range []*discordgo.File{iconFile("char", c1), iconFile("char", c2), iconFile("fuse", fuse)} {
+	for _, f := range []*discordgo.File{iconFile("fuse", fuse), iconFile("char", c1), iconFile("char", c2)} {
 		if f != nil {
 			files = append(files, f)
 		}
@@ -413,26 +454,30 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		handleAccept(s, i, db, user, matchID)
 	case "reject":
 		handleReject(s, i, db, user, matchID)
-	// Menús de equipo: personaje 1, personaje 2 y fusión (un menú por campo)
+	// Menús de equipo: personaje 1, personaje 2 y fusión
 	case "c1", "c2", "fuse":
 		side := ""
 		if len(parts) > 3 {
 			side = parts[3]
 		}
 		handleTeamSelect(s, i, db, user, matchID, parts[1], side, data.Values)
-	// Reporte del game (W) → verificación
+	// Reporte del game (W): 1 botón, se anota directo
 	case "win":
 		side := ""
 		if len(parts) > 3 {
 			side = parts[3]
 		}
 		handleReportGame(s, i, db, user, matchID, side)
-	case "verify":
-		handleVerifyGame(s, i, db, user, matchID)
+	// Corregir: deshace el ÚLTIMO game
 	case "correct":
 		handleCorrectReport(s, i, db, user, matchID)
-	case "undo", "reset":
-		handleReset(s, i, db, user, matchID)
+	// Resultado final del set: 2 dropdowns
+	case "fullset":
+		handleFullSetPanel(s, i, db, user, matchID)
+	case "fs1", "fs2":
+		handleFullSetSelect(s, i, db, user, matchID, parts[1], data.Values)
+	case "back":
+		handleFullSetBack(s, i, db, user, matchID)
 	case "close":
 		handleCloseSet(s, i, db, user, matchID)
 	case "acceptclose":
@@ -506,11 +551,8 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 		Components: getPlayerTeamKeyboard(match, "p2"),
 	})
 	gamePanel, err3 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content: fmt.Sprintf("⚔️ <@%s> vs <@%s> (FT %d · 💰 **%d pts**)\n"+
-			roomCodeLine(&match)+
-			"\n⏳ Armen sus equipos en los paneles de arriba: **Personaje 1 + Personaje 2 + Fusión**.\n"+
-			"El **REPORT GAME 1** aparece aquí cuando ambos equipos estén completos.",
-			match.Player1DiscordID, match.Player2DiscordID, match.TargetFT, match.PointsAtStake),
+		Content: fmt.Sprintf("⚔️ **%s vs %s** — FT %d · 💰 %d pts\n%s⏳ Armen sus equipos.",
+			match.Player1Tag, match.Player2Tag, match.TargetFT, match.PointsAtStake, roomCodeLine(&match)),
 	})
 	if err1 != nil {
 		log.Printf("❌ No se pudo publicar el panel de equipo de %s: %v\n", match.Player1Tag, err1)
@@ -655,75 +697,51 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 // ---------------------------------------------------------------------------
 
 func handleReportGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64, side string) {
-	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
+	var report *matchReport
+
+	match, err := withMatch(db, matchID, func(tx *gorm.DB, m *models.Matchmaking) error {
 		if !isCombatant(user.ID, m) {
-			return userError{"🚫 **Acceso denegado:** Solo los combatientes de este FT pueden reportar."}
+			return userError{"🚫 Solo los combatientes pueden reportar."}
 		}
 		if m.Status == statusPendingClose {
-			return userError{"⚠️ Hay una **propuesta de cierre** en curso: no se pueden reportar games."}
+			return userError{"⚠️ Hay una propuesta de cierre en curso."}
 		}
+		// Sets viejos atascados en PENDING_VERIFY (doble confirmación): se anota el
+		// game pendiente y se sigue con el flujo de 1 botón.
 		if m.Status == statusPendingVerify {
-			return userError{"⚠️ Hay un game esperando verificación: verifícalo o corrígelo primero."}
+			if m.PendingGameWinner == 1 || m.PendingGameWinner == 2 {
+				appendRound(m, fmt.Sprintf("p%d", m.PendingGameWinner))
+				if m.PendingGameWinner == 1 {
+					m.Score1++
+				} else {
+					m.Score2++
+				}
+			}
+			m.PendingGameWinner = 0
+			m.PendingReportedBy = ""
+			m.Status = statusInProgress
 		}
 		if m.Status != statusInProgress {
 			return userError{"⚠️ Este set no está en curso."}
 		}
 		if !m.P1TeamComplete() || !m.P2TeamComplete() {
-			return userError{"⚠️ Ambos equipos deben estar completos (Personaje 1 + Personaje 2 + Fusión) antes de reportar games."}
+			return userError{"⚠️ Ambos equipos deben estar completos antes de reportar."}
 		}
 		switch side {
-		case "p1":
-			m.PendingGameWinner = 1
-		case "p2":
-			m.PendingGameWinner = 2
+		case "p1", "p2":
+			appendRound(m, side)
+			if side == "p1" {
+				m.Score1++
+			} else {
+				m.Score2++
+			}
 		default:
 			return userError{"⚠️ Botón no válido."}
 		}
-		m.PendingReportedBy = user.ID
-		m.Status = statusPendingVerify
-		now := time.Now()
-		m.LastRoundAt = &now // actividad: reinicia el reloj de inactividad (2 h)
-		return nil
-	})
-	if err != nil {
-		respondError(s, i, err)
-		return
-	}
-	editMessage(s, i, verificationPanelContent(match), []discordgo.MessageComponent{getVerifyKeyboard(match.ID)})
-}
-
-// ---------------------------------------------------------------------------
-// 5. VERIFICAR EL GAME (Verify Result Submission): cualquiera de los dos.
-// ---------------------------------------------------------------------------
-
-func handleVerifyGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
-	var report *matchReport
-
-	match, err := withMatch(db, matchID, func(tx *gorm.DB, m *models.Matchmaking) error {
-		if !isCombatant(user.ID, m) {
-			return userError{"🚫 Solo los combatientes pueden verificar el reporte."}
-		}
-		if m.Status != statusPendingVerify {
-			return userError{"⚠️ No hay ningún game esperando verificación."}
-		}
-		// Quien reportó el game SOLO espera: la confirmación es del otro jugador.
-		if m.PendingReportedBy != "" && user.ID == m.PendingReportedBy {
-			return userError{fmt.Sprintf("⏳ Tú ya reportaste este game: espera la confirmación de **%s**.", pendingConfirmerTag(m))}
-		}
-
-		// El game queda REGISTRADO: historial + marcador.
-		appendRound(m, fmt.Sprintf("p%d", m.PendingGameWinner))
-		if m.PendingGameWinner == 1 {
-			m.Score1++
-		} else {
-			m.Score2++
-		}
-		m.PendingGameWinner = 0
-		m.PendingReportedBy = ""
 		now := time.Now()
 		m.LastRoundAt = &now
 
-		// ¿Llegó al FT? SIN doble confirmación de puntos: se aplica directo.
+		// ¿Llegó al FT? Se aplica directo: 1 botón, sin doble confirmación.
 		if m.Score1 >= m.TargetFT || m.Score2 >= m.TargetFT {
 			if m.Score1 > m.Score2 {
 				m.WinnerDiscordID, m.LoserDiscordID = m.Player1DiscordID, m.Player2DiscordID
@@ -736,8 +754,6 @@ func handleVerifyGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 				return err
 			}
 			report = &r
-		} else {
-			m.Status = statusInProgress
 		}
 		return nil
 	})
@@ -746,26 +762,10 @@ func handleVerifyGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 		return
 	}
 
-	// FIN del set: puntos aplicados → reporte → hilo borrado (con enlace a resultados).
 	if report != nil {
-		r := *report
-		editMessage(s, i, fmt.Sprintf(
-			"🏁 **SET COMPLETADO — RESULTADO APLICADO** (FT %d)\n\n"+
-				historyBlock(&r.Match)+
-				"🏆 Ganador: **%s** (+%s pts, total **%d**)\n"+
-				"El reporte final está publicado en <#%s>.\n"+
-				"📍 Consulta el historial de retas en <#%s>.\n\n"+
-				"⚠️ **Este hilo se eliminará automáticamente en 5 segundos...**",
-			r.Match.TargetFT, r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints,
-			getMatchmakingResultChannelID(), getMatchmakingResultChannelID()), nil)
-		go func() {
-			sendMatchmakingReport(s, r)
-			closeMatchThread(s, r.Match)
-		}()
+		publishFinished(s, i, *report)
 		return
 	}
-
-	// Game verificado → panel del siguiente game.
 	editMessage(s, i, gamePanelContent(match), []discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
 }
 
@@ -773,55 +773,37 @@ func handleVerifyGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 // 6. CORREGIR EL REPORTE: re-anota el game actual sin castigo.
 // ---------------------------------------------------------------------------
 
+// CORREGIR: deshace el ÚLTIMO game reportado (no reinicia el set).
 func handleCorrectReport(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
 	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
 		if !isCombatant(user.ID, m) {
-			return userError{"🚫 Solo los combatientes pueden corregir el reporte."}
+			return userError{"🚫 Solo los combatientes pueden corregir."}
 		}
-		if m.Status != statusPendingVerify {
-			return userError{"⚠️ No hay ningún reporte pendiente de verificación."}
+		if m.Status == statusPendingClose {
+			return userError{"⚠️ Hay una propuesta de cierre en curso."}
 		}
-		// Quien reportó el game SOLO espera: la confirmación es del otro jugador.
-		if m.PendingReportedBy != "" && user.ID == m.PendingReportedBy {
-			return userError{fmt.Sprintf("⏳ Tú ya reportaste este game: espera la confirmación de **%s**.", pendingConfirmerTag(m))}
+		if m.Status != statusInProgress {
+			return userError{"⚠️ Solo se puede corregir con el set en curso."}
 		}
-		m.Status = statusInProgress
-		m.PendingGameWinner = 0
-		m.PendingReportedBy = ""
-		return nil
-	})
-	if err != nil {
-		respondError(s, i, err)
-		return
-	}
-	editMessage(s, i, "✏️ **Reporte corregido:** re-anota el game actual.\n\n"+gamePanelContent(match),
-		[]discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
-}
-
-// ---------------------------------------------------------------------------
-// 7. REINICIAR / CORREGIR TODO: reinicia el set y vuelve a armar equipos.
-// ---------------------------------------------------------------------------
-
-func handleReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
-	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
-		if !isCombatant(user.ID, m) {
-			return userError{"🚫 **Acceso denegado:** Solo los combatientes pueden reiniciar el set."}
+		var hist []int
+		if b := []byte(m.RoundHistory); len(b) > 0 {
+			if err := json.Unmarshal(b, &hist); err != nil {
+				hist = nil
+			}
 		}
-		// Un set FINALIZADO no se puede reiniciar: duplicaría los puntos.
-		if m.Status != statusInProgress && m.Status != statusPendingVerify && m.Status != statusPendingClose {
-			return userError{"⚠️ Este set ya no se puede reiniciar."}
+		if len(hist) == 0 {
+			return userError{"⚠️ Todavía no hay games para corregir."}
 		}
-		m.Score1, m.Score2 = 0, 0
-		m.RoundHistory = "[]"
-		m.PendingGameWinner = 0
-		m.PendingReportedBy = ""
-		m.WinnerDiscordID, m.LoserDiscordID = "", ""
-		m.Status = statusInProgress
-		m.CloseRequestedAt = nil
-		m.CloseRequestedBy = ""
-		// Se vuelve a armar los equipos desde cero.
-		m.P1Char1, m.P1Char2, m.P1Fuse = "", "", ""
-		m.P2Char1, m.P2Char2, m.P2Fuse = "", "", ""
+		last := hist[len(hist)-1]
+		hist = hist[:len(hist)-1]
+		b, _ := json.Marshal(hist)
+		m.RoundHistory = string(b)
+		if last == 1 && m.Score1 > 0 {
+			m.Score1--
+		}
+		if last == 2 && m.Score2 > 0 {
+			m.Score2--
+		}
 		now := time.Now()
 		m.LastRoundAt = &now
 		return nil
@@ -830,12 +812,8 @@ func handleReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.
 		respondError(s, i, err)
 		return
 	}
-
-	// Vuelve a armar equipos: se restauran los menús de ambos paneles de equipo
-	// y el panel de games queda esperando de nuevo.
-	editMessage(s, i, "🔄 **SET REINICIADO:** armen de nuevo sus equipos en sus paneles. El **GAME 1** aparecerá aquí cuando ambos estén completos.", nil)
-	editThreadMessageFiles(s, match.ThreadID, match.TeamPanelMessageID1, teamPanelContent(match, "p1"), getPlayerTeamKeyboard(match, "p1"), nil)
-	editThreadMessageFiles(s, match.ThreadID, match.TeamPanelMessageID2, teamPanelContent(match, "p2"), getPlayerTeamKeyboard(match, "p2"), nil)
+	editMessage(s, i, "✏️ **Corregido:** se deshizo el último game.\n\n"+gamePanelContent(match),
+		[]discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
 }
 
 // ---------------------------------------------------------------------------
@@ -1159,7 +1137,7 @@ func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.Messag
 	}
 }
 
-// getGameKeyboard: botones de reporte del game (estilo start.gg).
+// getGameKeyboard: reporte por game (modo por defecto) + atajos.
 func getGameKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
 	return discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
@@ -1174,9 +1152,14 @@ func getGameKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
 				CustomID: fmt.Sprintf("ft_win_%d_p2", matchID),
 			},
 			discordgo.Button{
-				Label:    "⏪ Reiniciar / Corregir",
+				Label:    "✏️ Corregir",
 				Style:    discordgo.SecondaryButton,
-				CustomID: fmt.Sprintf("ft_undo_%d", matchID),
+				CustomID: fmt.Sprintf("ft_correct_%d", matchID),
+			},
+			discordgo.Button{
+				Label:    "📋 Resultado final",
+				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("ft_fullset_%d", matchID),
 			},
 			discordgo.Button{
 				Label:    "🏳️ Cerrar set",
@@ -1187,21 +1170,40 @@ func getGameKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
 	}
 }
 
-// getVerifyKeyboard: doble confirmación del game (RESULT VERIFICATION).
-func getVerifyKeyboard(matchID uint) discordgo.ActionsRow {
-	return discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
+// getFullSetKeyboard: 2 dropdowns (games de cada jugador, 0..FT) + volver.
+func getFullSetKeyboard(m models.Matchmaking) []discordgo.MessageComponent {
+	one := 1
+	opts := make([]discordgo.SelectMenuOption, 0, m.TargetFT+1)
+	for n := 0; n <= m.TargetFT; n++ {
+		opts = append(opts, discordgo.SelectMenuOption{Label: strconv.Itoa(n), Value: strconv.Itoa(n)})
+	}
+	row := func(sm discordgo.SelectMenu) discordgo.ActionsRow {
+		return discordgo.ActionsRow{Components: []discordgo.MessageComponent{sm}}
+	}
+	return []discordgo.MessageComponent{
+		row(discordgo.SelectMenu{
+			MenuType:    discordgo.StringSelectMenu,
+			CustomID:    fmt.Sprintf("ft_fs1_%d", m.ID),
+			Placeholder: fmt.Sprintf("🏆 Games de %s", m.Player1Tag),
+			MinValues:   &one,
+			MaxValues:   one,
+			Options:     opts,
+		}),
+		row(discordgo.SelectMenu{
+			MenuType:    discordgo.StringSelectMenu,
+			CustomID:    fmt.Sprintf("ft_fs2_%d", m.ID),
+			Placeholder: fmt.Sprintf("🏆 Games de %s", m.Player2Tag),
+			MinValues:   &one,
+			MaxValues:   one,
+			Options:     opts,
+		}),
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{
-				Label:    "✅ Verify Result Submission",
-				Style:    discordgo.SuccessButton,
-				CustomID: fmt.Sprintf("ft_verify_%d", matchID),
+				Label:    "◀️ Volver a reportar por games",
+				Style:    discordgo.SecondaryButton,
+				CustomID: fmt.Sprintf("ft_back_%d", m.ID),
 			},
-			discordgo.Button{
-				Label:    "✏️ Corregir Reporte",
-				Style:    discordgo.DangerButton,
-				CustomID: fmt.Sprintf("ft_correct_%d", matchID),
-			},
-		},
+		}},
 	}
 }
 
@@ -1246,66 +1248,24 @@ func teamPanelContent(m models.Matchmaking, side string) string {
 		f = n
 	}
 	if complete {
-		return fmt.Sprintf("🔒 **EQUIPO DE %s** — CONFIRMADO (FT %d)\n"+
-			"🎮 **Personaje 1:** %s\n"+
-			"🎮 **Personaje 2:** %s\n"+
-			"🔀 **Fusión:** %s\n\n"+
-			"✅ Equipo cerrado: la selección de personajes y fusión quedó oculta.\n"+
-			"¿Error? Usa **⏪ Reiniciar / Corregir** en el panel de games para re-armar los equipos.",
-			tag, m.TargetFT, pick(c1), pick(c2), f)
+		return fmt.Sprintf("🔒 **%s** — 🔀 %s · %s + %s", tag, f, pick(c1), pick(c2))
 	}
-	return fmt.Sprintf("🧑‍🤝‍🧑 **EQUIPO DE %s** — FT %d\n"+
-		"🎮 **Personaje 1:** %s\n"+
-		"🎮 **Personaje 2:** %s\n"+
-		"🔀 **Fusión:** %s\n\n"+
-		"Elige tu **Personaje 1**, tu **Personaje 2** (distinto) y tu **Fusión** en los menús. Se ocultan al confirmar los 3.",
-		tag, m.TargetFT, pick(c1), pick(c2), f)
+	return fmt.Sprintf("**%s** — 🔀 %s · 1️⃣ %s · 2️⃣ %s\nElige tus 3 picks 👇", tag, f, pick(c1), pick(c2))
 }
 
 // gamePanelContent: panel de reporte del game N (estilo start.gg).
 func gamePanelContent(m models.Matchmaking) string {
-	gameN := m.Score1 + m.Score2 + 1
-	return fmt.Sprintf("📋 **REPORT GAME %d** — FT %d (Meta: %d victorias)\n"+
-		"▸ **%s** · %s\n"+
-		"▸ **%s** · %s\n"+
-		roomCodeLine(&m)+
-		"\n"+historyBlock(&m)+
-		"¿Quién ganó el **GAME %d**? Presiona **W**.",
-		gameN, m.TargetFT, m.TargetFT,
-		m.Player1Tag, gamechars.TeamLabel(m.P1Char1, m.P1Char2, m.P1Fuse),
-		m.Player2Tag, gamechars.TeamLabel(m.P2Char1, m.P2Char2, m.P2Fuse),
-		gameN)
-}
-
-// verificationPanelContent: RESULT VERIFICATION del game reportado.
-func verificationPanelContent(m models.Matchmaking) string {
-	gameN := m.Score1 + m.Score2 + 1
-	res := "L - W"
-	if m.PendingGameWinner == 1 {
-		res = "W - L"
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "⚔️ **%s vs %s** — FT %d · 💰 %d pts · **%d - %d**\n",
+		m.Player1Tag, m.Player2Tag, m.TargetFT, m.PointsAtStake, m.Score1, m.Score2)
+	if m.RoomCode != "" {
+		fmt.Fprintf(&sb, "🏠 `%s`\n", m.RoomCode)
 	}
-	return fmt.Sprintf("🔍 **RESULT VERIFICATION — GAME %d**\n"+
-		"game %d: **%s** %s **%s**\n\n"+
-		"⏳ **%s** ya reportó: solo falta que **%s** presione **✅ Verify Result Submission**.\n"+
-		"✏️ ¿Reporte equivocado? **%s** puede presionar **Corregir Reporte** para re-anotar el game sin castigo.",
-		gameN, gameN, m.Player1Tag, res, m.Player2Tag,
-		pendingReporterTag(&m), pendingConfirmerTag(&m), pendingConfirmerTag(&m))
-}
-
-// pendingReporterTag / pendingConfirmerTag: quién reportó el game pendiente
-// y quién debe confirmarlo (el otro jugador).
-func pendingReporterTag(m *models.Matchmaking) string {
-	if m.PendingReportedBy == m.Player1DiscordID {
-		return m.Player1Tag
+	if seq := gameSequence(&m); seq != "" {
+		fmt.Fprintf(&sb, "%s\n", seq)
 	}
-	return m.Player2Tag
-}
-
-func pendingConfirmerTag(m *models.Matchmaking) string {
-	if m.PendingReportedBy == m.Player1DiscordID {
-		return m.Player2Tag
-	}
-	return m.Player1Tag
+	fmt.Fprintf(&sb, "GAME %d — **W** del ganador · ✏️ Corregir deshace el último", m.Score1+m.Score2+1)
+	return sb.String()
 }
 
 // historyBlock construye el resumen del set con el ORDEN de las victorias:
@@ -1340,7 +1300,52 @@ func roomCodeLine(m *models.Matchmaking) string {
 	if m.RoomCode == "" {
 		return ""
 	}
-	return fmt.Sprintf("🏠 **Código de la sala:** `%s`\n➡️ *Cópialo y úsalo para entrar a la sala.*\n", m.RoomCode)
+	return fmt.Sprintf("🏠 **Sala:** `%s`\n", m.RoomCode)
+}
+
+func fullSetPanelContent(m models.Matchmaking) string {
+	p1, p2 := "—", "—"
+	if m.FinalPick1 >= 0 {
+		p1 = strconv.Itoa(m.FinalPick1)
+	}
+	if m.FinalPick2 >= 0 {
+		p2 = strconv.Itoa(m.FinalPick2)
+	}
+	return fmt.Sprintf("📋 **RESULTADO FINAL** — FT %d\n%s: **%s** · %s: **%s**\nElige los games de cada jugador (0 a %d); el set cierra con los dos.",
+		m.TargetFT, m.Player1Tag, p1, m.Player2Tag, p2, m.TargetFT)
+}
+
+// gameSequence: "games `1-2-1`" — quién ganó cada game (1 o 2), en una línea.
+func gameSequence(m *models.Matchmaking) string {
+	var hist []int
+	if b := []byte(m.RoundHistory); len(b) > 0 {
+		if err := json.Unmarshal(b, &hist); err != nil {
+			hist = nil
+		}
+	}
+	if len(hist) == 0 {
+		return ""
+	}
+	parts := make([]string, len(hist))
+	for idx, h := range hist {
+		parts[idx] = strconv.Itoa(h)
+	}
+	return "games `" + strings.Join(parts, "-") + "`"
+}
+
+// publishFinished muestra el resultado del set terminado y limpia el hilo.
+func publishFinished(s *discordgo.Session, i *discordgo.InteractionCreate, r matchReport) {
+	editMessage(s, i, fmt.Sprintf(
+		"🏁 **SET FINALIZADO** — %s `%d - %d` %s\n"+
+			"🏆 **%s** %s pts (total **%d**)\n"+
+			"📊 Reporte en <#%s> · este hilo se borra en 5 s.",
+		r.Match.Player1Tag, r.Match.Score1, r.Match.Score2, r.Match.Player2Tag,
+		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints,
+		getMatchmakingResultChannelID()), nil)
+	go func() {
+		sendMatchmakingReport(s, r)
+		closeMatchThread(s, r.Match)
+	}()
 }
 
 // appendRound agrega una victoria al historial (1 = Player1, 2 = Player2).
@@ -1376,47 +1381,119 @@ func getWinnerTag(m models.Matchmaking) string {
 // Reporte al canal de resultados
 // ---------------------------------------------------------------------------
 
+// sendMatchmakingReport publica el resultado en el canal de resultados.
+// Diseño "Versus": marcador protagonista + puntos/ranking en 2 columnas
+// + los PNGs del equipo ganador (fusión → champ → champ) debajo del embed.
 func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 	m := r.Match
 
+	// Equipo del ganador (para el footer y las imágenes).
+	wc1, wc2, wfuse := m.P2Char1, m.P2Char2, m.P2Fuse
+	if m.WinnerDiscordID == m.Player1DiscordID {
+		wc1, wc2, wfuse = m.P1Char1, m.P1Char2, m.P1Fuse
+	}
+
+	// Marcador con el ganador siempre primero.
+	scoreW, scoreL := m.Score2, m.Score1
+	if m.WinnerDiscordID == m.Player1DiscordID {
+		scoreW, scoreL = m.Score1, m.Score2
+	}
+
+	// Línea de games: secuencia compacta; si se reportó directo (dropdowns), sin historial.
+	gamesLine := "games `" + reportSequence(&m) + "`"
+	if reportSequence(&m) == "" {
+		gamesLine = "games — *(reporte directo)*"
+	}
+
 	embed := &discordgo.MessageEmbed{
-		Title: "📊 REPORTE DE MATCHMAKING",
-		Color: 0x00FF00,
-		Description: fmt.Sprintf("Se ha completado oficialmente la reta **FT %d** entre **%s** y **%s**.\n\n%s",
-			m.TargetFT, m.Player1Tag, m.Player2Tag, historyBlock(&m)),
+		Color: 0x5865F2,
+		Title: fmt.Sprintf("%s 🆚 %s", r.WinnerTag, r.LoserTag),
+		Description: fmt.Sprintf(
+			"🏆 **%s** `%d — %d` **%s**\nFT %d · %s · 💰 **%d pts**",
+			r.WinnerTag, scoreW, scoreL, r.LoserTag, m.TargetFT, gamesLine, m.PointsAtStake),
 		Fields: []*discordgo.MessageEmbedField{
 			{
-				Name:   "🥊 Marcador Final",
-				Value:  fmt.Sprintf("**%s** `%d - %d` **%s**", m.Player1Tag, m.Score1, m.Score2, m.Player2Tag),
-				Inline: false,
-			},
-			{
-				Name: "🧑‍🤝‍🧑 Equipos (2XKO)",
-				Value: fmt.Sprintf("**%s:** %s\n**%s:** %s",
-					m.Player1Tag, gamechars.TeamLabel(m.P1Char1, m.P1Char2, m.P1Fuse),
-					m.Player2Tag, gamechars.TeamLabel(m.P2Char1, m.P2Char2, m.P2Fuse)),
-				Inline: false,
-			},
-			{
-				Name: fmt.Sprintf("🏆 %s (Ganador)", r.WinnerTag),
-				Value: fmt.Sprintf("💰 **%s pts** (total: **%d**)\n📈 Posición: **#%d** → **#%d** (%s)",
-					signed(r.WinnerDelta), r.WinnerPoints, r.OldRankW, r.NewRankW, formatRankChange(r.OldRankW, r.NewRankW)),
+				Name:   fmt.Sprintf("🏆 %s", r.WinnerTag),
+				Value:  fmt.Sprintf("%s pts → **%d** · %s", signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW)),
 				Inline: true,
 			},
 			{
-				Name: fmt.Sprintf("💀 %s (Perdedor)", r.LoserTag),
-				Value: fmt.Sprintf("📉 **%s pts** (total: **%d**)\n📉 Posición: **#%d** → **#%d** (%s)",
-					signed(r.LoserDelta), r.LoserPoints, r.OldRankL, r.NewRankL, formatRankChange(r.OldRankL, r.NewRankL)),
+				Name:   fmt.Sprintf("💀 %s", r.LoserTag),
+				Value:  fmt.Sprintf("%s pts → **%d** · %s", signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL)),
 				Inline: true,
 			},
-		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Hot Coffee 2XKO • Ranking de Matchmaking",
 		},
 	}
 
-	if _, err := s.ChannelMessageSendEmbed(getMatchmakingResultChannelID(), embed); err != nil {
+	// PNGs del equipo ganador: fusión → champ 1 → champ 2 (128px, reescalados).
+	files := winnerSideFiles(&m)
+	fuseIncluded := false
+	fuseName := fmt.Sprintf("fuse_%s.png", wfuse)
+	for _, f := range files {
+		if f.Name == fuseName {
+			fuseIncluded = true
+			break
+		}
+	}
+
+	// Footer con el equipo ganador; la fusión como icono (solo si el PNG se adjuntó).
+	embed.Footer = &discordgo.MessageEmbedFooter{
+		Text: "🏆 Equipo ganador · " + gamechars.TeamLabel(wc1, wc2, wfuse),
+	}
+	if fuseIncluded {
+		embed.Footer.IconURL = "attachment://" + fuseName
+	}
+
+	if _, err := s.ChannelMessageSendComplex(getMatchmakingResultChannelID(), &discordgo.MessageSend{
+		Embeds: []*discordgo.MessageEmbed{embed},
+		Files:  files,
+	}); err != nil {
 		log.Printf("❌ No se pudo publicar el reporte de matchmaking: %v\n", err)
+	}
+}
+
+// winnerSideFiles: los PNGs del equipo ganador (fusión → champ → champ) para el reporte.
+func winnerSideFiles(m *models.Matchmaking) []*discordgo.File {
+	c1, c2, fuse := m.P2Char1, m.P2Char2, m.P2Fuse
+	if m.WinnerDiscordID == m.Player1DiscordID {
+		c1, c2, fuse = m.P1Char1, m.P1Char2, m.P1Fuse
+	}
+	files := make([]*discordgo.File, 0, 3)
+	for _, f := range []*discordgo.File{iconFile("fuse", fuse), iconFile("char", c1), iconFile("char", c2)} {
+		if f != nil {
+			files = append(files, f)
+		}
+	}
+	return files
+}
+
+// reportSequence: "2-2-2" — quién ganó cada game (1 = P1, 2 = P2); "" si no hay historial.
+func reportSequence(m *models.Matchmaking) string {
+	var hist []int
+	if b := []byte(m.RoundHistory); len(b) > 0 {
+		if err := json.Unmarshal(b, &hist); err != nil {
+			hist = nil
+		}
+	}
+	if len(hist) == 0 {
+		return ""
+	}
+	parts := make([]string, len(hist))
+	for i, h := range hist {
+		parts[i] = strconv.Itoa(h)
+	}
+	return strings.Join(parts, "-")
+}
+
+// rankLine: "#2 → #2" (con ▲/▼ y cuántas posiciones si cambió) — versión compacta.
+func rankLine(oldRank, newRank int) string {
+	switch {
+	case oldRank == newRank:
+		return fmt.Sprintf("#%d → #%d", oldRank, newRank)
+	case oldRank > newRank:
+		return fmt.Sprintf("#%d → #%d ▲%d", oldRank, newRank, oldRank-newRank)
+	default:
+		return fmt.Sprintf("#%d → #%d ▼%d", oldRank, newRank, newRank-oldRank)
 	}
 }
 
@@ -1434,6 +1511,111 @@ func formatRankChange(oldRank, newRank int) string {
 		return fmt.Sprintf("▼ Descendió %d pos.", newRank-oldRank)
 	}
 	return "➡️ Se mantiene"
+}
+
+// RESULTADO FINAL: reportar todo el set con 2 dropdowns (0..FT).
+
+func handleFullSetPanel(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
+	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
+		if !isCombatant(user.ID, m) {
+			return userError{"🚫 Solo los combatientes pueden reportar el set."}
+		}
+		if m.Status != statusInProgress {
+			return userError{"⚠️ Este set no está en curso."}
+		}
+		if !m.P1TeamComplete() || !m.P2TeamComplete() {
+			return userError{"⚠️ Ambos equipos deben estar completos antes de reportar."}
+		}
+		m.FinalPick1, m.FinalPick2 = -1, -1
+		return nil
+	})
+	if err != nil {
+		respondError(s, i, err)
+		return
+	}
+	editMessage(s, i, fullSetPanelContent(match), getFullSetKeyboard(match))
+}
+
+func handleFullSetSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64, kind string, values []string) {
+	if kind != "fs1" && kind != "fs2" || len(values) != 1 {
+		replyEphemeral(s, i, "⚠️ Selección no válida.")
+		return
+	}
+	v, err := strconv.Atoi(values[0])
+	if err != nil || v < 0 {
+		replyEphemeral(s, i, "⚠️ Selección no válida.")
+		return
+	}
+
+	var report *matchReport
+
+	match, err2 := withMatch(db, matchID, func(tx *gorm.DB, m *models.Matchmaking) error {
+		if !isCombatant(user.ID, m) {
+			return userError{"🚫 Solo los combatientes pueden reportar el set."}
+		}
+		if m.Status != statusInProgress {
+			return userError{"⚠️ Este set no está en curso."}
+		}
+		if v > m.TargetFT {
+			return userError{fmt.Sprintf("⚠️ Valor fuera de rango (0 a %d).", m.TargetFT)}
+		}
+		if kind == "fs1" {
+			m.FinalPick1 = v
+		} else {
+			m.FinalPick2 = v
+		}
+		// Falta un dropdown: se muestra el progreso y se espera el otro.
+		if m.FinalPick1 < 0 || m.FinalPick2 < 0 {
+			return nil
+		}
+		// Resultado válido: exactamente uno llega al FT.
+		if (m.FinalPick1 != m.TargetFT) == (m.FinalPick2 != m.TargetFT) {
+			return userError{fmt.Sprintf("⚠️ En FT %d, uno debe terminar con **%d** y el otro con menos.", m.TargetFT, m.TargetFT)}
+		}
+		m.Score1, m.Score2 = m.FinalPick1, m.FinalPick2
+		m.RoundHistory = "[]" // reporte directo: sin historial game a game
+		if m.Score1 > m.Score2 {
+			m.WinnerDiscordID, m.LoserDiscordID = m.Player1DiscordID, m.Player2DiscordID
+		} else {
+			m.WinnerDiscordID, m.LoserDiscordID = m.Player2DiscordID, m.Player1DiscordID
+		}
+		m.Status = statusFinished
+		now := time.Now()
+		m.LastRoundAt = &now
+		r, err := applyMatchResult(tx, m)
+		if err != nil {
+			return err
+		}
+		report = &r
+		return nil
+	})
+	if err2 != nil {
+		respondError(s, i, err2)
+		return
+	}
+	if report != nil {
+		publishFinished(s, i, *report)
+		return
+	}
+	editMessage(s, i, fullSetPanelContent(match), getFullSetKeyboard(match))
+}
+
+func handleFullSetBack(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
+	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
+		if !isCombatant(user.ID, m) {
+			return userError{"🚫 Solo los combatientes pueden usar el panel."}
+		}
+		if m.Status != statusInProgress {
+			return userError{"⚠️ Este set no está en curso."}
+		}
+		m.FinalPick1, m.FinalPick2 = -1, -1
+		return nil
+	})
+	if err != nil {
+		respondError(s, i, err)
+		return
+	}
+	editMessage(s, i, gamePanelContent(match), []discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
 }
 
 // ---------------------------------------------------------------------------
