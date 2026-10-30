@@ -100,12 +100,64 @@ func editMessage(s *discordgo.Session, i *discordgo.InteractionCreate, content s
 	if components == nil {
 		components = []discordgo.MessageComponent{}
 	}
+	emptyEmbeds := []*discordgo.MessageEmbed{}
 	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content:    &content,
 		Components: &components,
+		Embeds:     &emptyEmbeds,
 	})
 	if err != nil {
 		log.Printf("❌ No se pudo editar el mensaje de la interacción: %v\n", err)
+	}
+}
+
+// gamePanelEmbed: panel de games estilo "VS Card": avatar de Player1 como autor
+// vs avatar de Player2 como miniatura (esquinas enfrentadas) + marcador protagonista.
+func gamePanelEmbed(m models.Matchmaking) *discordgo.MessageEmbed {
+	gameN := m.Score1 + m.Score2 + 1
+
+	// Marcador: nombres a los lados del score.
+	desc := fmt.Sprintf("**%s** `%d — %d` **%s**\n", m.Player1Tag, m.Score1, m.Score2, m.Player2Tag)
+
+	if m.P1TeamComplete() && m.P2TeamComplete() {
+		info := "games `" + reportSequence(&m) + "`"
+		if reportSequence(&m) == "" {
+			info = "games — *(reporte directo)*"
+		}
+		if m.RoomCode != "" {
+			info += " · 🏠 `" + m.RoomCode + "`"
+		}
+		desc += info
+	} else {
+		desc += "⏳ Armen sus equipos en los paneles de arriba"
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Color:       0x5865F2,
+		Title:       fmt.Sprintf("VS · GAME %d · FT %d · 💰 %d pts", gameN, m.TargetFT, m.PointsAtStake),
+		Description: desc,
+	}
+	if m.Player1Avatar != "" {
+		embed.Author = &discordgo.MessageEmbedAuthor{Name: m.Player1Tag, IconURL: m.Player1Avatar}
+	}
+	if m.Player2Avatar != "" {
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: m.Player2Avatar}
+	}
+	return embed
+}
+
+// refreshGamePanel reemplaza el mensaje donde se hizo clic por el panel VS.
+// prefix es un texto opcional que queda sobre el embed ("" = sin texto).
+func refreshGamePanel(s *discordgo.Session, i *discordgo.InteractionCreate, prefix string, m models.Matchmaking) {
+	embeds := []*discordgo.MessageEmbed{gamePanelEmbed(m)}
+	components := getGameKeyboard(m.ID, m.Player1Tag, m.Player2Tag)
+	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content:    &prefix,
+		Embeds:     &embeds,
+		Components: &components,
+	})
+	if err != nil {
+		log.Printf("❌ No se pudo actualizar el panel de games: %v\n", err)
 	}
 }
 
@@ -189,48 +241,27 @@ func teamPanelFiles(m models.Matchmaking, side string) []*discordgo.File {
 	return files
 }
 
-// editMessageFiles edita el mensaje de la interacción adjuntando archivos.
-// El slice vacío de Attachments REEMPLAZA las imágenes anteriores (sin acumular).
-func editMessageFiles(s *discordgo.Session, i *discordgo.InteractionCreate, content string, components []discordgo.MessageComponent, files []*discordgo.File) {
+// editMessageEmbedFiles edita el mensaje de la interacción con un embed,
+// componentes y adjuntos (los adjuntos anteriores se reemplazan).
+func editMessageEmbedFiles(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) {
 	if components == nil {
 		components = []discordgo.MessageComponent{}
 	}
 	if files == nil {
 		files = []*discordgo.File{}
 	}
-	empty := []*discordgo.MessageAttachment{}
+	empty := ""
+	emptyAtts := []*discordgo.MessageAttachment{}
+	embeds := []*discordgo.MessageEmbed{embed}
 	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content:     &content,
+		Content:     &empty,
+		Embeds:      &embeds,
 		Components:  &components,
 		Files:       files,
-		Attachments: &empty,
+		Attachments: &emptyAtts,
 	})
 	if err != nil {
-		log.Printf("❌ No se pudo editar el mensaje de la interacción: %v\n", err)
-	}
-}
-
-// editThreadMessageFiles edita un mensaje fijo del hilo con adjuntos (fuera de una interacción).
-func editThreadMessageFiles(s *discordgo.Session, threadID, messageID, content string, components []discordgo.MessageComponent, files []*discordgo.File) {
-	if messageID == "" || threadID == "" {
-		return
-	}
-	if components == nil {
-		components = []discordgo.MessageComponent{}
-	}
-	if files == nil {
-		files = []*discordgo.File{}
-	}
-	empty := []*discordgo.MessageAttachment{}
-	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
-		Channel:     threadID,
-		ID:          messageID,
-		Content:     &content,
-		Components:  &components,
-		Files:       files,
-		Attachments: &empty,
-	}); err != nil {
-		log.Printf("❌ No se pudo editar el mensaje %s del hilo %s: %v\n", messageID, threadID, err)
+		log.Printf("❌ No se pudo editar el panel de equipo: %v\n", err)
 	}
 }
 
@@ -541,18 +572,17 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	}
 
 	// Paneles del hilo: EQUIPO por jugador (Personaje 1, Personaje 2, Fusión)
-	// + panel de games que se activa cuando ambos equipos estén completos.
 	teamP1, err1 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content:    teamPanelContent(match, "p1"),
+		Embeds:     []*discordgo.MessageEmbed{teamPanelEmbed(match, "p1")},
 		Components: getPlayerTeamKeyboard(match, "p1"),
 	})
 	teamP2, err2 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content:    teamPanelContent(match, "p2"),
+		Embeds:     []*discordgo.MessageEmbed{teamPanelEmbed(match, "p2")},
 		Components: getPlayerTeamKeyboard(match, "p2"),
 	})
+
 	gamePanel, err3 := s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content: fmt.Sprintf("⚔️ **%s vs %s** — FT %d · 💰 %d pts\n%s⏳ Armen sus equipos.",
-			match.Player1Tag, match.Player2Tag, match.TargetFT, match.PointsAtStake, roomCodeLine(&match)),
+		Embeds: []*discordgo.MessageEmbed{gamePanelEmbed(match)},
 	})
 	if err1 != nil {
 		log.Printf("❌ No se pudo publicar el panel de equipo de %s: %v\n", match.Player1Tag, err1)
@@ -678,17 +708,17 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 	// ¿El equipo de quien eligió quedó completo (2 personajes + fusión)?
 	teamComplete := (side == "p1" && match.P1TeamComplete()) || (side == "p2" && match.P2TeamComplete())
 
-	// Equipo completo → menús ocultos + imágenes; si falta algo, menús visibles + imágenes.
+	// Ficha actualizada: embed + imágenes; los menús solo si falta algo por elegir.
 	if teamComplete {
-		editMessageFiles(s, i, teamPanelContent(match, side), nil, teamPanelFiles(match, side))
+		editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), nil, teamPanelFiles(match, side))
 	} else {
-		editMessageFiles(s, i, teamPanelContent(match, side), getPlayerTeamKeyboard(match, side), teamPanelFiles(match, side))
+		editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), getPlayerTeamKeyboard(match, side), teamPanelFiles(match, side))
 	}
 
 	// Ambos equipos completos → activa el panel de games (REPORT GAME 1).
 	if match.P1TeamComplete() && match.P2TeamComplete() {
 		editThreadMessage(s, match.ThreadID, match.PanelMessageID, gamePanelContent(match),
-			[]discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
+			getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag))
 	}
 }
 
@@ -766,7 +796,7 @@ func handleReportGame(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 		publishFinished(s, i, *report)
 		return
 	}
-	editMessage(s, i, gamePanelContent(match), []discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
+	refreshGamePanel(s, i, "", match)
 }
 
 // ---------------------------------------------------------------------------
@@ -812,8 +842,8 @@ func handleCorrectReport(s *discordgo.Session, i *discordgo.InteractionCreate, d
 		respondError(s, i, err)
 		return
 	}
-	editMessage(s, i, "✏️ **Corregido:** se deshizo el último game.\n\n"+gamePanelContent(match),
-		[]discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
+	replyEphemeral(s, i, "✏️ **Corregido:** se deshizo el último game.")
+	refreshGamePanel(s, i, "", match)
 }
 
 // ---------------------------------------------------------------------------
@@ -925,8 +955,7 @@ func handleDeclineCloseSet(s *discordgo.Session, i *discordgo.InteractionCreate,
 		return
 	}
 
-	content := "▶️ **SEGUIMOS JUGANDO** — la propuesta de cierre fue rechazada.\n\n" + gamePanelContent(match)
-	editMessage(s, i, content, []discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
+	refreshGamePanel(s, i, "▶️ **Seguimos jugando** — la propuesta de cierre fue rechazada.", match)
 }
 
 // publishClosedSet muestra el resultado del cierre y publica el reporte + limpia el hilo.
@@ -1091,9 +1120,7 @@ func finishWithLeader(tx *gorm.DB, m *models.Matchmaking) (matchReport, bool, er
 // getPlayerTeamKeyboard: menús del equipo de UN jugador (personaje 1, personaje 2 y fusión).
 func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.MessageComponent {
 	one := 1
-	tag := m.Player1Tag
 	if side == "p2" {
-		tag = m.Player2Tag
 	}
 
 	charOpts := make([]discordgo.SelectMenuOption, 0, len(gamechars.Characters))
@@ -1113,7 +1140,7 @@ func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.Messag
 		row(discordgo.SelectMenu{
 			MenuType:    discordgo.StringSelectMenu,
 			CustomID:    fmt.Sprintf("ft_c1_%d_%s", m.ID, side),
-			Placeholder: fmt.Sprintf("🎮 Personaje 1 de %s", tag),
+			Placeholder: "1️⃣ Elige tu Personaje 1",
 			MinValues:   &one,
 			MaxValues:   one,
 			Options:     charOpts,
@@ -1121,7 +1148,7 @@ func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.Messag
 		row(discordgo.SelectMenu{
 			MenuType:    discordgo.StringSelectMenu,
 			CustomID:    fmt.Sprintf("ft_c2_%d_%s", m.ID, side),
-			Placeholder: fmt.Sprintf("🎮 Personaje 2 de %s", tag),
+			Placeholder: "2️⃣ Elige tu Personaje 2",
 			MinValues:   &one,
 			MaxValues:   one,
 			Options:     charOpts,
@@ -1129,7 +1156,7 @@ func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.Messag
 		row(discordgo.SelectMenu{
 			MenuType:    discordgo.StringSelectMenu,
 			CustomID:    fmt.Sprintf("ft_fuse_%d_%s", m.ID, side),
-			Placeholder: fmt.Sprintf("🔀 Fusión de %s", tag),
+			Placeholder: "🔀 Elige tu Fusión",
 			MinValues:   &one,
 			MaxValues:   one,
 			Options:     fuseOpts,
@@ -1137,10 +1164,10 @@ func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.Messag
 	}
 }
 
-// getGameKeyboard: reporte por game (modo por defecto) + atajos.
-func getGameKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
-	return discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
+// getGameKeyboard: fila 1 = botones W (protagonistas) · fila 2 = utilitarios.
+func getGameKeyboard(matchID uint, p1Tag, p2Tag string) []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{
 				Label:    fmt.Sprintf("W %s", p1Tag),
 				Style:    discordgo.SuccessButton,
@@ -1151,6 +1178,8 @@ func getGameKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
 				Style:    discordgo.SuccessButton,
 				CustomID: fmt.Sprintf("ft_win_%d_p2", matchID),
 			},
+		}},
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{
 				Label:    "✏️ Corregir",
 				Style:    discordgo.SecondaryButton,
@@ -1166,7 +1195,7 @@ func getGameKeyboard(matchID uint, p1Tag, p2Tag string) discordgo.ActionsRow {
 				Style:    discordgo.SecondaryButton,
 				CustomID: fmt.Sprintf("ft_close_%d", matchID),
 			},
-		},
+		}},
 	}
 }
 
@@ -1229,28 +1258,45 @@ func getCloseKeyboard(matchID uint) discordgo.ActionsRow {
 // Contenido de los paneles
 // ---------------------------------------------------------------------------
 
-// teamPanelContent: panel de equipo de un jugador (personaje 1, personaje 2 y fusión).
-func teamPanelContent(m models.Matchmaking, side string) string {
-	tag, c1, c2, fuse := m.Player1Tag, m.P1Char1, m.P1Char2, m.P1Fuse
+// teamPanelEmbed: "ficha de jugador" — el avatar de Discord preside el panel,
+// slots con estado (✔ / por elegir) y color verde al confirmar el equipo.
+func teamPanelEmbed(m models.Matchmaking, side string) *discordgo.MessageEmbed {
+	tag, avatar, c1, c2, fuse := m.Player1Tag, m.Player1Avatar, m.P1Char1, m.P1Char2, m.P1Fuse
 	complete := m.P1TeamComplete()
 	if side == "p2" {
-		tag, c1, c2, fuse = m.Player2Tag, m.P2Char1, m.P2Char2, m.P2Fuse
+		tag, avatar, c1, c2, fuse = m.Player2Tag, m.Player2Avatar, m.P2Char1, m.P2Char2, m.P2Fuse
 		complete = m.P2TeamComplete()
 	}
-	pick := func(id string) string {
+
+	// Slots: Personaje 1 (point), Personaje 2 (assist) y Fusión.
+	charSlot := func(label, id string) string {
 		if n := gamechars.CharacterName(id); n != "" {
-			return n
+			return fmt.Sprintf("%s — **%s** ✔", label, n)
 		}
-		return "—"
+		return fmt.Sprintf("%s — *por elegir*", label)
 	}
-	f := "—"
+	fuseSlot := "🔀 Fusión — *por elegir*"
 	if n := gamechars.FuseName(fuse); n != "" {
-		f = n
+		fuseSlot = fmt.Sprintf("🔀 Fusión — **%s** ✔", n)
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Color:       0x5865F2, // blurple: armando equipo
+		Title:       fmt.Sprintf("🧩 ARMA TU EQUIPO · FT %d", m.TargetFT),
+		Description: fmt.Sprintf("%s\n%s\n%s", charSlot("1️⃣ Personaje 1", c1), charSlot("2️⃣ Personaje 2", c2), fuseSlot),
+	}
+	if avatar != "" {
+		embed.Author = &discordgo.MessageEmbedAuthor{Name: tag, IconURL: avatar}
 	}
 	if complete {
-		return fmt.Sprintf("🔒 **%s** — 🔀 %s · %s + %s", tag, f, pick(c1), pick(c2))
+		embed.Color = 0x57F287 // verde: equipo listo
+		embed.Title = fmt.Sprintf("🔒 EQUIPO CONFIRMADO · FT %d", m.TargetFT)
+	} else {
+		embed.Footer = &discordgo.MessageEmbedFooter{
+			Text: "1️⃣ point · 2️⃣ assist · los menús se ocultan al completar los 3",
+		}
 	}
-	return fmt.Sprintf("**%s** — 🔀 %s · 1️⃣ %s · 2️⃣ %s\nElige tus 3 picks 👇", tag, f, pick(c1), pick(c2))
+	return embed
 }
 
 // gamePanelContent: panel de reporte del game N (estilo start.gg).
@@ -1615,7 +1661,7 @@ func handleFullSetBack(s *discordgo.Session, i *discordgo.InteractionCreate, db 
 		respondError(s, i, err)
 		return
 	}
-	editMessage(s, i, gamePanelContent(match), []discordgo.MessageComponent{getGameKeyboard(match.ID, match.Player1Tag, match.Player2Tag)})
+	refreshGamePanel(s, i, "", match)
 }
 
 // ---------------------------------------------------------------------------

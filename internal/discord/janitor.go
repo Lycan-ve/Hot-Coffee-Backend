@@ -44,11 +44,13 @@ func editPanel(s *discordgo.Session, m *models.Matchmaking, content string, comp
 	if components == nil {
 		components = []discordgo.MessageComponent{}
 	}
+	emptyEmbeds := []*discordgo.MessageEmbed{}
 	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		Channel:    m.ThreadID,
 		ID:         m.PanelMessageID,
 		Content:    &content,
 		Components: &components,
+		Embeds:     &emptyEmbeds,
 	}); err != nil {
 		log.Printf("❌ Janitor: no se pudo editar el panel de la reta %d: %v\n", m.ID, err)
 	}
