@@ -207,8 +207,9 @@ func gamePanelEmbed(m models.Matchmaking) (*discordgo.MessageEmbed, []*discordgo
 			Text: fmt.Sprintf("🟢 gana %s · 🔴 gana %s", m.Player1Tag, m.Player2Tag),
 		}
 
-		// Tarjeta VS: champions de ambos + marcador pixel-art al centro.
-		if card := matchCard(m, m.Score1, m.Score2, "match.png"); card != nil {
+		// Tarjeta VS: champions de ambos + marcador pixel-art al centro
+		// (sin escala de grises: el set sigue en curso).
+		if card := matchCard(m, m.Score1, m.Score2, "", "match.png"); card != nil {
 			embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://match.png"}
 			files = append(files, card)
 		}
@@ -292,6 +293,27 @@ func loadIconCell(kind, id string, size int) image.Image {
 		for x := 0; x < dw; x++ {
 			sx := b.Min.X + x*k + k/2
 			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	return dst
+}
+
+// grayScaleIcon convierte un icono a blanco y negro (luminancia ITU-R 601,
+// conservando el canal alfa). Se usa para los champions del PERDEDOR en el
+// reporte: el ganador queda a todo color y el contraste cuenta la historia.
+func grayScaleIcon(img image.Image) image.Image {
+	if img == nil {
+		return nil
+	}
+	b := img.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(dst, dst.Bounds(), img, b.Min, draw.Src)
+	for y := 0; y < dst.Bounds().Dy(); y++ {
+		for x := 0; x < dst.Bounds().Dx(); x++ {
+			c := dst.RGBAAt(x, y)
+			// 0.299·R + 0.587·G + 0.114·B en enteros (77+150+28 = 255).
+			g := uint8((uint16(c.R)*77 + uint16(c.G)*150 + uint16(c.B)*28) / 255)
+			dst.SetRGBA(x, y, color.RGBA{g, g, g, c.A})
 		}
 	}
 	return dst
@@ -412,12 +434,23 @@ var (
 // matchCard: tarjeta del enfrentamiento — champions de P1 (izquierda) vs
 // champions de P2 (derecha) y el marcador pixel-art al centro. Fondo negro,
 // marco morado y score verde (diseño pedazo a pedido del equipo de testers).
-func matchCard(m models.Matchmaking, scoreL, scoreR int, name string) *discordgo.File {
+// graySide ("p1"/"p2"/"") pone los champions de ese lado en blanco y negro:
+// en el reporte se pasa el lado del PERDEDOR; en el panel de games va vacío
+// (nadie ha perdido todavía).
+func matchCard(m models.Matchmaking, scoreL, scoreR int, graySide, name string) *discordgo.File {
 	const cell, pad = 120, 14
 	const scoreW = 150
 
-	left := []image.Image{loadIconCell("char", m.P1Char1, cell), loadIconCell("char", m.P1Char2, cell)}
-	right := []image.Image{loadIconCell("char", m.P2Char1, cell), loadIconCell("char", m.P2Char2, cell)}
+	// Champions de cada lado; los de graySide van en blanco y negro.
+	loadSide := func(c1, c2 string, grey bool) []image.Image {
+		i1, i2 := loadIconCell("char", c1, cell), loadIconCell("char", c2, cell)
+		if grey {
+			i1, i2 = grayScaleIcon(i1), grayScaleIcon(i2)
+		}
+		return []image.Image{i1, i2}
+	}
+	left := loadSide(m.P1Char1, m.P1Char2, graySide == "p1")
+	right := loadSide(m.P2Char1, m.P2Char2, graySide == "p2")
 	any := false
 	for _, img := range append(left, right...) {
 		if img != nil {
@@ -2006,7 +2039,13 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 		files = append(files, f)
 	}
 	// Tarjeta VS: champions de ambos + marcador pixel-art (negro/morado/verde).
-	if card := matchCard(m, m.Score1, m.Score2, "match.png"); card != nil {
+	// Los champions del PERDEDOR van en blanco y negro (pedido del equipo de
+	// testers): el ganador resalta a todo color.
+	graySide := "p1"
+	if m.WinnerDiscordID == m.Player1DiscordID {
+		graySide = "p2"
+	}
+	if card := matchCard(m, m.Score1, m.Score2, graySide, "match.png"); card != nil {
 		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://match.png"}
 		files = append(files, card)
 	}
