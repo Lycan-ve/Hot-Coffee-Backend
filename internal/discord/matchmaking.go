@@ -140,9 +140,10 @@ func keycap(n int) string {
 	return ""
 }
 
-// roundTrack: el set en UNA sola secuencia de games numerados con bolitas —
-// 1️⃣2️⃣3️⃣4️⃣5️⃣ / 🟢🔴🔴🟢⚪. Desde la perspectiva del jugador de referencia
-// (refSide): 🟢 ganó ese game, 🔴 lo perdió, ⚪ aún no se juega.
+// roundTrack: el set en UNA sola línea de games numerados con bolitas —
+// 1️⃣-2️⃣-3️⃣-4️⃣-5️⃣ / 🟢-🔴-🔴-🟢-⚪. Cubre TODOS los games posibles del set
+// (FT3 = 5 bolitas, FT5 = 9: al FT*2-1). Desde la perspectiva del jugador de
+// referencia (refSide): 🟢 ganó ese game, 🔴 lo perdió, ⚪ aún no se juega.
 func roundTrack(m models.Matchmaking, refSide string) string {
 	var hist []int
 	if b := []byte(m.RoundHistory); len(b) > 0 {
@@ -150,8 +151,13 @@ func roundTrack(m models.Matchmaking, refSide string) string {
 			hist = nil
 		}
 	}
+	maxGames := m.TargetFT*2 - 1 // FT3 → 5 games, FT5 → 9 games
 	nums, dots := "", ""
-	for g := 1; g <= m.TargetFT; g++ {
+	for g := 1; g <= maxGames; g++ {
+		if g > 1 {
+			nums += "-"
+			dots += "-"
+		}
 		nums += keycap(g)
 		switch {
 		case g > len(hist):
@@ -314,8 +320,8 @@ func drawCardBackground(dst *image.RGBA, accent color.RGBA, bgTop, bgBottom colo
 	}
 }
 
-// bannerV2 compone los iconos en un PNG horizontal con fondo degradado oscuro,
-// marco redondeado del color de acento e iconos centrados en celdas de 140 px.
+// bannerV2 compone los iconos en un PNG horizontal con fondo NEGRO, marco
+// redondeado morado e iconos centrados en celdas de 140 px (diseño tester).
 func bannerV2(name string, accent color.RGBA, cells ...image.Image) *discordgo.File {
 	valid := make([]image.Image, 0, len(cells))
 	for _, c := range cells {
@@ -332,7 +338,7 @@ func bannerV2(name string, accent color.RGBA, cells ...image.Image) *discordgo.F
 	)
 	w, h := pad*2+cell*len(valid), pad*2+cell
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	drawCardBackground(dst, accent, color.RGBA{44, 49, 58, 255}, color.RGBA{20, 22, 26, 255})
+	drawCardBackground(dst, accent, cardBlack, cardBlack)
 	for i, c := range valid {
 		b := c.Bounds()
 		x0 := pad + i*cell + (cell-b.Dx())/2
@@ -511,10 +517,8 @@ func iconFilePNG(name, kind, id string, size int) *discordgo.File {
 func teamPanelEmbedWithBanner(m models.Matchmaking, side string) (*discordgo.MessageEmbed, []*discordgo.File) {
 	embed := teamPanelEmbed(m, side)
 	c1, c2, fuse := m.P1Char1, m.P1Char2, m.P1Fuse
-	complete := m.P1TeamComplete()
 	if side == "p2" {
 		c1, c2, fuse = m.P2Char1, m.P2Char2, m.P2Fuse
-		complete = m.P2TeamComplete()
 	}
 
 	files := []*discordgo.File{}
@@ -527,12 +531,9 @@ func teamPanelEmbedWithBanner(m models.Matchmaking, side string) (*discordgo.Mes
 		}
 	}
 
-	// Banner: los 2 champions; marco blurple armando, dorado al confirmar.
-	accent := color.RGBA{0x58, 0x65, 0xF2, 0xFF}
-	if complete {
-		accent = color.RGBA{0xF0, 0xB2, 0x32, 0xFF}
-	}
-	if banner := bannerV2("team.png", accent,
+	// Banner: los 2 champions con marco morado sobre negro (diseño tester);
+	// la confirmación se marca con el embed dorado, no con el marco.
+	if banner := bannerV2("team.png", cardPurple,
 		loadIconCell("char", c1, 140), loadIconCell("char", c2, 140)); banner != nil {
 		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://team.png"}
 		files = append(files, banner)
@@ -650,8 +651,10 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		reply("❌ Comando inválido.")
 		return
 	}
-	if targetFT != 3 && targetFT != 5 && targetFT != 7 && targetFT != 10 {
-		reply("❌ Formato inválido. Usa FT 3, 5, 7 o 10.")
+	// Solo FT 3 y FT 5: los formatos 7 y 10 están desactivados (la línea de
+	// bolitas y los keycaps 1..10 solo cubren bien hasta FT5 = 9 games).
+	if targetFT != 3 && targetFT != 5 {
+		reply("❌ Formato inválido. Usa FT 3 o FT 5.")
 		return
 	}
 
