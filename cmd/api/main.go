@@ -206,18 +206,16 @@ func main() {
 	// Construcción del comando de barra /ft con sus opciones (objetivo, rival y sala)
 	cmd := &discordgo.ApplicationCommand{
 		Name:        "ft",
-		Description: "Inicia un matchmaking FT (3, 5, 7, 10) contra un rival",
+		Description: "Inicia un matchmaking FT (3 o 5) contra un rival",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionInteger,
 				Name:        "objetivo",
-				Description: "Formato de la reta (3, 5, 7, 10)",
+				Description: "Formato de la reta (3 o 5)",
 				Required:    true,
 				Choices: []*discordgo.ApplicationCommandOptionChoice{
 					{Name: "FT 3", Value: 3},
 					{Name: "FT 5", Value: 5},
-					{Name: "FT 7", Value: 7},
-					{Name: "FT 10", Value: 10},
 				},
 			},
 			{
