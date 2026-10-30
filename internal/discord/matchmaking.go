@@ -148,8 +148,9 @@ func gamePanelEmbed(m models.Matchmaking) (*discordgo.MessageEmbed, []*discordgo
 		}
 		embed.Description = desc + info
 
-		// Tarjeta VS: champions de ambos + marcador pixel-art al centro.
-		if card := matchCard(m, color.RGBA{0x58, 0x65, 0xF2, 0xFF}, m.Score1, m.Score2, "match.png"); card != nil {
+		// Tarjeta VS: champions de ambos + marcador pixel-art verde al centro
+		// (verde = set "en juego"; el dorado queda para la victoria final).
+		if card := matchCard(m, color.RGBA{0x58, 0x65, 0xF2, 0xFF}, color.RGBA{0x57, 0xF2, 0x87, 0xFF}, m.Score1, m.Score2, "match.png"); card != nil {
 			embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://match.png"}
 			files = append(files, card)
 		}
@@ -344,7 +345,9 @@ func drawScorePixels(dst *image.RGBA, cx, cy int, text string, maxW int, c color
 
 // matchCard: tarjeta del enfrentamiento — champions de P1 (izquierda) vs
 // champions de P2 (derecha) y el marcador pixel-art al centro.
-func matchCard(m models.Matchmaking, accent color.RGBA, scoreL, scoreR int, name string) *discordgo.File {
+// accent: color del marco; scoreColor: color del marcador (verde en el panel
+// de games "en juego", dorado en el reporte de victoria).
+func matchCard(m models.Matchmaking, accent color.RGBA, scoreColor color.Color, scoreL, scoreR int, name string) *discordgo.File {
 	const cell, pad = 120, 14
 	const scoreW = 150
 
@@ -381,7 +384,7 @@ func matchCard(m models.Matchmaking, accent color.RGBA, scoreL, scoreR int, name
 
 	drawScorePixels(dst, pad+cell*2+scoreW/2, h/2,
 		fmt.Sprintf("%d-%d", scoreL, scoreR), scoreW-16,
-		color.RGBA{0xF0, 0xB2, 0x32, 0xFF}) // dorado
+		scoreColor) // verde en games, dorado en el reporte
 
 	var out bytes.Buffer
 	if err := png.Encode(&out, dst); err != nil {
@@ -1928,8 +1931,9 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://fusion.png"}
 		files = append(files, f)
 	}
-	// Tarjeta VS con marco dorado: champions de ambos + marcador pixel-art.
-	if card := matchCard(m, color.RGBA{0xF0, 0xB2, 0x32, 0xFF}, m.Score1, m.Score2, "match.png"); card != nil {
+	// Tarjeta VS con marco dorado: champions de ambos + marcador pixel-art
+	// dorado (la victoria es dorada; el verde queda para el set en juego).
+	if card := matchCard(m, color.RGBA{0xF0, 0xB2, 0x32, 0xFF}, color.RGBA{0xF0, 0xB2, 0x32, 0xFF}, m.Score1, m.Score2, "match.png"); card != nil {
 		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://match.png"}
 		files = append(files, card)
 	}
