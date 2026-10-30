@@ -199,9 +199,10 @@ func gamePanelEmbed(m models.Matchmaking) (*discordgo.MessageEmbed, []*discordgo
 		if m.RoomCode != "" {
 			info += " · 🏠 `" + m.RoomCode + "`"
 		}
-		// Secuencia única de games: 1️⃣2️⃣3️⃣4️⃣5️⃣ / 🟢🔴🔴🟢⚪ (verde = ganó P1,
-		// el jugador destacado del panel; la leyenda va en el footer).
-		embed.Description = roundTrack(m, "p1") + "\n" + info
+		// Secuencia única de games: 1️⃣-2️⃣-3️⃣-4️⃣-5️⃣ / 🟢-🔴-🔴-🟢-⚪ (verde = ganó
+		// P1, el jugador destacado del panel; la leyenda va en el footer). Salto de
+		// línea extra para separar las bolitas de la línea de formato.
+		embed.Description = roundTrack(m, "p1") + "\n\n" + info
 		embed.Footer = &discordgo.MessageEmbedFooter{
 			Text: fmt.Sprintf("🟢 gana %s · 🔴 gana %s", m.Player1Tag, m.Player2Tag),
 		}
@@ -1983,7 +1984,8 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 		desc += roundTrack(m, ref) + "\n"
 		foot += " · 🟢 gana " + r.WinnerTag
 	}
-	desc += fmt.Sprintf("🏆 **%s** %s pts → **%d** · %s\n❌ %s %s pts → **%d** · %s",
+	// Salto de línea extra: separa el marcador/bolitas del bloque de puntos.
+	desc += "\n" + fmt.Sprintf("🏆 **%s** %s pts → **%d** · %s\n❌ %s %s pts → **%d** · %s",
 		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW),
 		r.LoserTag, signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL))
 
