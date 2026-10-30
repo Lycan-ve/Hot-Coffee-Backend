@@ -730,6 +730,13 @@ func handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 			side = parts[3]
 		}
 		handleTeamSelect(s, i, db, user, matchID, parts[1], side, data.Values)
+	// Corregir la selección de equipo: borra los picks y reabre los menús
+	case "reset":
+		side := ""
+		if len(parts) > 3 {
+			side = parts[3]
+		}
+		handleTeamReset(s, i, db, user, matchID, side)
 	// Reporte del game (W): 1 botón, se anota directo
 	case "win":
 		side := ""
@@ -812,21 +819,7 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	// Selección PRIVADA: la ficha con menús va por MD — el rival no ve tus picks
 	// hasta que confirmas los 3. En el hilo solo quedan paneles de estado.
 	setupDM := func(side string) bool {
-		playerID := match.Player1DiscordID
-		if side == "p2" {
-			playerID = match.Player2DiscordID
-		}
-		dm, err := s.UserChannelCreate(playerID)
-		if err != nil {
-			return false
-		}
-		embed, files := teamPanelEmbedWithBanner(match, side)
-		_, err = s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
-			Embeds:     []*discordgo.MessageEmbed{embed},
-			Components: getPlayerTeamKeyboard(match, side),
-			Files:      files,
-		})
-		return err == nil
+		return sendTeamPanelDM(s, match, side)
 	}
 	// El retado (P2) siempre elige por MD. El retador (P1) ya eligió desde el
 	// panel del /ft en el 99% de los casos: MD SOLO como fallback si no terminó.
@@ -851,7 +844,9 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 			tag = match.Player2Tag
 		}
 		foot := "Revisa tus mensajes privados para elegir tu equipo"
-		if side == "p1" && !viaDM {
+		if side == "p1" && viaDM {
+			foot = "Termina de armar tu equipo en el panel del /ft o en tu MD"
+		} else if side == "p1" && !viaDM {
 			foot = "No pude enviarte MD: elige tu equipo en el panel del /ft o en este panel"
 		} else if side == "p2" && !viaDM {
 			foot = "No pude enviarte MD: elige tu equipo en este panel"
@@ -1015,19 +1010,18 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 	teamComplete := (side == "p1" && match.P1TeamComplete()) || (side == "p2" && match.P2TeamComplete())
 
 	// Panel donde se hizo clic (MD privado, público o el efímero del /ft).
+	// Teclado progresivo: mientras faltan picks muestra solo los menús pendientes
+	// + "🔄 Corregir"; al completar se cierra la selección y queda el botón.
 	embed, files := teamPanelEmbedWithBanner(match, side)
+	keyboard := getPlayerTeamKeyboard(match, side)
+	if !editMessageEmbedFiles(s, i, embed, keyboard, files) {
+		// El efímero del /ft a veces rechaza adjuntos al editar → sin banner.
+		editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), keyboard, nil)
+	}
 	if teamComplete {
-		if !editMessageEmbedFiles(s, i, embed, nil, files) {
-			// El efímero del /ft a veces rechaza adjuntos al editar → sin banner.
-			editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), nil, nil)
-		}
 		// Solo al CONFIRMAR se revela el equipo en el panel público del hilo
 		// (durante la reta pendiente el hilo aún no existe: no pasa nada).
 		refreshPublicTeamPanel(s, match, side)
-	} else {
-		if !editMessageEmbedFiles(s, i, embed, getPlayerTeamKeyboard(match, side), files) {
-			editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), getPlayerTeamKeyboard(match, side), nil)
-		}
 	}
 
 	// Ambos equipos completos → activa el panel de games (tarjeta VS + botones W).
@@ -1036,8 +1030,86 @@ func handleTeamSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *
 	}
 }
 
-// refreshPublicTeamPanel revela el equipo confirmado en el panel público del hilo
-// (mientras el jugador elige, el panel solo muestra "Armando equipo...").
+// handleTeamReset: "🔄 Corregir selección" — borra los picks del jugador y
+// reabre los menús (para miss-clicks). Solo mientras no haya games jugados.
+func handleTeamReset(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64, side string) {
+	if side != "p1" && side != "p2" {
+		return
+	}
+	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
+		if side == "p1" && user.ID != m.Player1DiscordID {
+			return userError{fmt.Sprintf("🚫 Solo **%s** puede corregir su selección.", m.Player1Tag)}
+		}
+		if side == "p2" && user.ID != m.Player2DiscordID {
+			return userError{fmt.Sprintf("🚫 Solo **%s** puede corregir su selección.", m.Player2Tag)}
+		}
+		// El retador puede corregir desde el panel del /ft con la reta pendiente.
+		if m.Status == statusPending && side == "p2" {
+			return userError{"⚠️ Aún no has aceptado esta reta."}
+		}
+		if m.Status != statusInProgress && !(m.Status == statusPending && side == "p1") {
+			return userError{"⚠️ El set ya no está en curso."}
+		}
+		// Con games jugados el equipo queda sellado (el marcador y la tarjeta VS
+		// ya se mostraron con esos personajes).
+		if m.Score1+m.Score2 > 0 {
+			return userError{"⚠️ Ya hay games jugados en este set: el equipo ya no se puede cambiar."}
+		}
+		if side == "p1" {
+			m.P1Char1, m.P1Char2, m.P1Fuse = "", "", ""
+		} else {
+			m.P2Char1, m.P2Char2, m.P2Fuse = "", "", ""
+		}
+		return nil
+	})
+	if err != nil {
+		respondError(s, i, err)
+		return
+	}
+
+	// El panel donde se hizo clic vuelve al estado de selección (menús completos).
+	// Si se corrigió desde el hilo público, los menús van por MD (privacidad);
+	// si el MD falla, quedan en ese panel como fallback.
+	embed, files := teamPanelEmbedWithBanner(match, side)
+	keyboard := getPlayerTeamKeyboard(match, side)
+	if i.ChannelID == match.ThreadID && sendTeamPanelDM(s, match, side) {
+		keyboard = nil // sigue eligiendo por MD; el hilo queda solo como estado
+	}
+	if !editMessageEmbedFiles(s, i, embed, keyboard, files) {
+		editMessageEmbedFiles(s, i, teamPanelEmbed(match, side), keyboard, nil)
+	}
+
+	// El hilo refleja el cambio: el panel público vuelve a "Armando equipo..."
+	// y el panel de games (si la tarjeta VS ya se había mostrado) vuelve a esperar.
+	refreshPublicTeamPanel(s, match, side)
+	if !match.P1TeamComplete() || !match.P2TeamComplete() {
+		refreshGamePanelThread(s, match)
+	}
+}
+
+// sendTeamPanelDM envía la ficha de selección con sus menús por mensaje privado.
+// Devuelve false si el MD falla (el llamador decide el fallback).
+func sendTeamPanelDM(s *discordgo.Session, m models.Matchmaking, side string) bool {
+	playerID := m.Player1DiscordID
+	if side == "p2" {
+		playerID = m.Player2DiscordID
+	}
+	dm, err := s.UserChannelCreate(playerID)
+	if err != nil {
+		return false
+	}
+	embed, files := teamPanelEmbedWithBanner(m, side)
+	_, err = s.ChannelMessageSendComplex(dm.ID, &discordgo.MessageSend{
+		Embeds:     []*discordgo.MessageEmbed{embed},
+		Components: getPlayerTeamKeyboard(m, side),
+		Files:      files,
+	})
+	return err == nil
+}
+
+// refreshPublicTeamPanel sincroniza el panel público del hilo con el estado del
+// equipo: ficha dorada al confirmar, "🤖 Armando equipo..." mientras elige
+// (también si corrige la selección después de haber confirmado).
 func refreshPublicTeamPanel(s *discordgo.Session, m models.Matchmaking, side string) {
 	msgID := m.TeamPanelMessageID1
 	if side == "p2" {
@@ -1046,7 +1118,30 @@ func refreshPublicTeamPanel(s *discordgo.Session, m models.Matchmaking, side str
 	if m.ThreadID == "" || msgID == "" {
 		return
 	}
-	embed, files := teamPanelEmbedWithBanner(m, side)
+
+	complete := (side == "p1" && m.P1TeamComplete()) || (side == "p2" && m.P2TeamComplete())
+	var embed *discordgo.MessageEmbed
+	var files []*discordgo.File
+	var components *[]discordgo.MessageComponent
+	if complete {
+		embed, files = teamPanelEmbedWithBanner(m, side)
+		// El dueño puede corregir desde el hilo (mientras no haya games).
+		btns := getTeamResetKeyboard(m, side)
+		components = &btns
+	} else {
+		tag := m.Player1Tag
+		if side == "p2" {
+			tag = m.Player2Tag
+		}
+		embed = &discordgo.MessageEmbed{
+			Color:       0x5865F2,
+			Title:       "👤 " + tag,
+			Description: "🤖 Armando equipo...",
+		}
+		// Components nil = sin cambios: si este panel es el fallback público con
+		// menús, estos se conservan; si era solo de estado, sigue limpio.
+	}
+
 	emptyAtts := []*discordgo.MessageAttachment{}
 	embeds := []*discordgo.MessageEmbed{embed}
 	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
@@ -1054,9 +1149,10 @@ func refreshPublicTeamPanel(s *discordgo.Session, m models.Matchmaking, side str
 		ID:          msgID,
 		Embeds:      &embeds,
 		Files:       files,
+		Components:  components,
 		Attachments: &emptyAtts,
 	}); err != nil {
-		log.Printf("❌ No se pudo revelar el equipo en el hilo: %v\n", err)
+		log.Printf("❌ No se pudo sincronizar el panel público de equipo: %v\n", err)
 	}
 }
 
@@ -1491,10 +1587,25 @@ func finishWithLeader(tx *gorm.DB, m *models.Matchmaking) (matchReport, bool, er
 // Teclados (botones y menús)
 // ---------------------------------------------------------------------------
 
-// getPlayerTeamKeyboard: menús del equipo de UN jugador (personaje 1, personaje 2 y fusión).
+// getPlayerTeamKeyboard: menús de selección PROGRESIVOS — cada menú desaparece
+// al elegirse (elegiste P1 → solo quedan P2 y fusión; elegiste P2 → solo la
+// fusión). Si hay al menos una elección, aparece "🔄 Corregir selección" para
+// empezar de cero (miss-clicks). Equipo completo → solo queda el botón.
 func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.MessageComponent {
-	one := 1
+	c1, c2, fuse := m.P1Char1, m.P1Char2, m.P1Fuse
+	complete := m.P1TeamComplete()
+	if side == "p2" {
+		c1, c2, fuse = m.P2Char1, m.P2Char2, m.P2Fuse
+		complete = m.P2TeamComplete()
+	}
 
+	// Equipo confirmado: la selección se cierra; queda la opción de corregir
+	// (útil si el miss-click fue justo en la fusión, el último menú).
+	if complete {
+		return getTeamResetKeyboard(m, side)
+	}
+
+	one := 1
 	charOpts := make([]discordgo.SelectMenuOption, 0, len(gamechars.Characters))
 	for _, c := range gamechars.Characters {
 		charOpts = append(charOpts, discordgo.SelectMenuOption{Label: c.Name, Value: c.ID})
@@ -1508,31 +1619,55 @@ func getPlayerTeamKeyboard(m models.Matchmaking, side string) []discordgo.Messag
 		return discordgo.ActionsRow{Components: []discordgo.MessageComponent{sm}}
 	}
 
-	return []discordgo.MessageComponent{
-		row(discordgo.SelectMenu{
+	rows := []discordgo.MessageComponent{}
+	if c1 == "" {
+		rows = append(rows, row(discordgo.SelectMenu{
 			MenuType:    discordgo.StringSelectMenu,
 			CustomID:    fmt.Sprintf("ft_c1_%d_%s", m.ID, side),
 			Placeholder: "1️⃣ Elige tu Personaje 1",
 			MinValues:   &one,
 			MaxValues:   one,
 			Options:     charOpts,
-		}),
-		row(discordgo.SelectMenu{
+		}))
+	}
+	if c2 == "" {
+		rows = append(rows, row(discordgo.SelectMenu{
 			MenuType:    discordgo.StringSelectMenu,
 			CustomID:    fmt.Sprintf("ft_c2_%d_%s", m.ID, side),
 			Placeholder: "2️⃣ Elige tu Personaje 2",
 			MinValues:   &one,
 			MaxValues:   one,
 			Options:     charOpts,
-		}),
-		row(discordgo.SelectMenu{
+		}))
+	}
+	if fuse == "" {
+		rows = append(rows, row(discordgo.SelectMenu{
 			MenuType:    discordgo.StringSelectMenu,
 			CustomID:    fmt.Sprintf("ft_fuse_%d_%s", m.ID, side),
 			Placeholder: "🔀 Elige tu Fusión",
 			MinValues:   &one,
 			MaxValues:   one,
 			Options:     fuseOpts,
-		}),
+		}))
+	}
+	// Ya hay al menos una elección → botón para corregir miss-clicks.
+	if c1 != "" || c2 != "" || fuse != "" {
+		rows = append(rows, getTeamResetKeyboard(m, side)...)
+	}
+	return rows
+}
+
+// getTeamResetKeyboard: "🔄 Corregir selección" — borra los picks del jugador y
+// reabre los 3 menús (solo funciona mientras no haya games jugados).
+func getTeamResetKeyboard(m models.Matchmaking, side string) []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{
+				Label:    "🔄 Corregir selección",
+				Style:    discordgo.SecondaryButton,
+				CustomID: fmt.Sprintf("ft_reset_%d_%s", m.ID, side),
+			},
+		}},
 	}
 }
 
