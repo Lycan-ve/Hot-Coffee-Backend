@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/png"
 	"log"
@@ -112,35 +113,28 @@ func editMessage(s *discordgo.Session, i *discordgo.InteractionCreate, content s
 	}
 }
 
-// gamePanelEmbed: panel de games estilo "VS Card": avatar de Player1 como autor
-// vs avatar de Player2 como miniatura (esquinas enfrentadas) + marcador protagonista.
+// gamePanelEmbed: el marcador es el protagonista (línea propia en bold);
+// todo lo demás queda en una línea tenue. Avatares enfrentados.
 func gamePanelEmbed(m models.Matchmaking) *discordgo.MessageEmbed {
 	gameN := m.Score1 + m.Score2 + 1
 
-	// Marcador: nombres a los lados del score.
-	desc := fmt.Sprintf("**%s** `%d — %d` **%s**\n", m.Player1Tag, m.Score1, m.Score2, m.Player2Tag)
-
+	desc := fmt.Sprintf("**%d — %d**\n", m.Score1, m.Score2)
 	if m.P1TeamComplete() && m.P2TeamComplete() {
-		info := ""
+		info := fmt.Sprintf("FT %d · 💰 %d pts", m.TargetFT, m.PointsAtStake)
 		if seq := reportSequence(&m); seq != "" {
-			info = "games `" + seq + "`"
+			info += " · games `" + seq + "`"
 		}
 		if m.RoomCode != "" {
-			if info != "" {
-				info += " · "
-			}
-			info += "🏠 `" + m.RoomCode + "`"
+			info += " · 🏠 `" + m.RoomCode + "`"
 		}
-		if info != "" {
-			desc += info
-		}
+		desc += info
 	} else {
 		desc += "⏳ Armen sus equipos en los paneles de arriba"
 	}
 
 	embed := &discordgo.MessageEmbed{
 		Color:       0x5865F2,
-		Title:       fmt.Sprintf("VS · GAME %d · FT %d · 💰 %d pts", gameN, m.TargetFT, m.PointsAtStake),
+		Title:       fmt.Sprintf("GAME %d", gameN),
 		Description: desc,
 	}
 	if m.Player1Avatar != "" {
@@ -222,11 +216,9 @@ func loadIconCell(kind, id string, size int) image.Image {
 	return dst
 }
 
-// teamBannerFile compone los iconos (fusión → champ → champ) en UNA sola imagen
-// horizontal con celdas de 128 px sobre fondo transparente. Se referencia desde
-// el embed con attachment://team_banner.png — así las imágenes viven DENTRO del
-// embed y Discord no las tira arriba del mensaje. Devuelve nil si no hay iconos.
-func teamBannerFile(cells ...image.Image) *discordgo.File {
+// bannerV2 compone los iconos en un PNG horizontal con fondo degradado oscuro,
+// marco redondeado del color de acento e iconos centrados en celdas de 140 px.
+func bannerV2(name string, accent color.RGBA, cells ...image.Image) *discordgo.File {
 	valid := make([]image.Image, 0, len(cells))
 	for _, c := range cells {
 		if c != nil {
@@ -236,38 +228,128 @@ func teamBannerFile(cells ...image.Image) *discordgo.File {
 	if len(valid) == 0 {
 		return nil
 	}
-	const cell = 128
-	canvas := image.NewRGBA(image.Rect(0, 0, cell*len(valid), cell))
-	for idx, c := range valid {
+	const (
+		cell   = 140 // celda por icono
+		pad    = 12  // margen interior
+		radius = 24  // esquinas redondeadas
+		frame  = 3   // grosor del marco
+	)
+	w, h := pad*2+cell*len(valid), pad*2+cell
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	top, bottom := color.RGBA{44, 49, 58, 255}, color.RGBA{20, 22, 26, 255}
+	for y := 0; y < h; y++ {
+		bg := lerpColor(top, bottom, float64(y)/float64(h-1))
+		for x := 0; x < w; x++ {
+			if !inRoundedRect(x, y, w, h, radius) {
+				continue // transparente: esquinas del PNG
+			}
+			if isFrameEdge(x, y, w, h, radius, frame) {
+				dst.Set(x, y, accent)
+			} else {
+				dst.Set(x, y, bg)
+			}
+		}
+	}
+	for i, c := range valid {
 		b := c.Bounds()
-		x0 := idx*cell + (cell-b.Dx())/2
-		y0 := (cell - b.Dy()) / 2
-		draw.Draw(canvas, image.Rect(x0, y0, x0+b.Dx(), y0+b.Dy()), c, b.Min, draw.Over)
+		x0 := pad + i*cell + (cell-b.Dx())/2
+		y0 := pad + (cell-b.Dy())/2
+		draw.Draw(dst, image.Rect(x0, y0, x0+b.Dx(), y0+b.Dy()), c, b.Min, draw.Over)
 	}
 	var out bytes.Buffer
-	if err := png.Encode(&out, canvas); err != nil {
-		log.Printf("⚠️ No se pudo codificar el banner del equipo: %v\n", err)
+	if err := png.Encode(&out, dst); err != nil {
 		return nil
 	}
-	return &discordgo.File{Name: "team_banner.png", Reader: bytes.NewReader(out.Bytes())}
+	return &discordgo.File{Name: name, Reader: bytes.NewReader(out.Bytes())}
 }
 
-// teamPanelEmbedWithBanner construye la ficha del jugador y, si hay picks, mete
-// el banner fusión → champ → champ dentro del embed.
+// lerpColor interpola linealmente dos colores (t en [0,1]).
+func lerpColor(a, b color.RGBA, t float64) color.RGBA {
+	return color.RGBA{
+		uint8(float64(a.R) + t*float64(b.R-a.R)),
+		uint8(float64(a.G) + t*float64(b.G-a.G)),
+		uint8(float64(a.B) + t*float64(b.B-a.B)),
+		255,
+	}
+}
+
+// inRoundedRect dice si (x, y) cae dentro de un rectángulo con esquinas redondeadas.
+func inRoundedRect(x, y, w, h, r int) bool {
+	if x < 0 || y < 0 || x >= w || y >= h {
+		return false
+	}
+	clamp := func(v, lo, hi int) int {
+		if v < lo {
+			return lo
+		}
+		if v > hi {
+			return hi
+		}
+		return v
+	}
+	cx, cy := x, y
+	if r > 0 {
+		cx, cy = clamp(x, r, w-1-r), clamp(y, r, h-1-r)
+	}
+	dx, dy := x-cx, y-cy
+	return dx*dx+dy*dy <= r*r
+}
+
+// isFrameEdge dice si el píxel pertenece al marco de la forma.
+func isFrameEdge(x, y, w, h, r, f int) bool {
+	r2 := r - f
+	if r2 < 0 {
+		r2 = 0
+	}
+	return inRoundedRect(x, y, w, h, r) && !inRoundedRect(x-f, y-f, w-2*f, h-2*f, r2)
+}
+
+// iconFilePNG exporta un icono como adjunto suelto (p. ej. la fusión en la
+// miniatura del embed, vía attachment://).
+func iconFilePNG(name, kind, id string, size int) *discordgo.File {
+	img := loadIconCell(kind, id, size)
+	if img == nil {
+		return nil
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		return nil
+	}
+	return &discordgo.File{Name: name, Reader: bytes.NewReader(out.Bytes())}
+}
+
+// teamPanelEmbedWithBanner: la FUSIÓN vive en la miniatura del embed
+// (attachment://fusion.png) y el banner lleva SOLO los 2 champions.
 func teamPanelEmbedWithBanner(m models.Matchmaking, side string) (*discordgo.MessageEmbed, []*discordgo.File) {
 	embed := teamPanelEmbed(m, side)
 	c1, c2, fuse := m.P1Char1, m.P1Char2, m.P1Fuse
+	complete := m.P1TeamComplete()
 	if side == "p2" {
 		c1, c2, fuse = m.P2Char1, m.P2Char2, m.P2Fuse
+		complete = m.P2TeamComplete()
 	}
-	if banner := teamBannerFile(
-		loadIconCell("fuse", fuse, 128),
-		loadIconCell("char", c1, 128),
-		loadIconCell("char", c2, 128)); banner != nil {
-		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://team_banner.png"}
-		return embed, []*discordgo.File{banner}
+
+	files := []*discordgo.File{}
+
+	// Miniatura: el icono de la FUSIÓN (la identidad del equipo).
+	if fuse != "" {
+		if f := iconFilePNG("fusion.png", "fuse", fuse, 80); f != nil {
+			embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://fusion.png"}
+			files = append(files, f)
+		}
 	}
-	return embed, nil
+
+	// Banner: los 2 champions; marco blurple armando, dorado al confirmar.
+	accent := color.RGBA{0x58, 0x65, 0xF2, 0xFF}
+	if complete {
+		accent = color.RGBA{0xF0, 0xB2, 0x32, 0xFF}
+	}
+	if banner := bannerV2("team.png", accent,
+		loadIconCell("char", c1, 140), loadIconCell("char", c2, 140)); banner != nil {
+		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://team.png"}
+		files = append(files, banner)
+	}
+	return embed, files
 }
 
 // editMessageEmbedFiles edita el mensaje de la interacción con un embed,
@@ -1302,8 +1384,8 @@ func getCloseKeyboard(matchID uint) discordgo.ActionsRow {
 // Contenido de los paneles
 // ---------------------------------------------------------------------------
 
-// teamPanelEmbed: "ficha de jugador" — el avatar de Discord preside el panel,
-// slots con estado (✔ / por elegir) y color verde al confirmar el equipo.
+// teamPanelEmbed: ficha del jugador. La FUSIÓN manda: al confirmar, encabeza el
+// título y el embed pasa a dorado; mientras, slots con estado (✔ / por elegir).
 func teamPanelEmbed(m models.Matchmaking, side string) *discordgo.MessageEmbed {
 	tag, avatar, c1, c2, fuse := m.Player1Tag, m.Player1Avatar, m.P1Char1, m.P1Char2, m.P1Fuse
 	complete := m.P1TeamComplete()
@@ -1312,7 +1394,18 @@ func teamPanelEmbed(m models.Matchmaking, side string) *discordgo.MessageEmbed {
 		complete = m.P2TeamComplete()
 	}
 
-	// Slots: Personaje 1 (point), Personaje 2 (assist) y Fusión.
+	embed := &discordgo.MessageEmbed{}
+	if avatar != "" {
+		embed.Author = &discordgo.MessageEmbedAuthor{Name: tag, IconURL: avatar}
+	}
+
+	if complete {
+		embed.Color = 0xFEE75C // dorado: equipo listo
+		embed.Title = fmt.Sprintf("⚡ %s · FT %d", gamechars.FuseName(fuse), m.TargetFT)
+		embed.Description = fmt.Sprintf("🔒 **%s + %s**", gamechars.CharacterName(c1), gamechars.CharacterName(c2))
+		return embed
+	}
+
 	charSlot := func(label, id string) string {
 		if n := gamechars.CharacterName(id); n != "" {
 			return fmt.Sprintf("%s — **%s** ✔", label, n)
@@ -1323,22 +1416,11 @@ func teamPanelEmbed(m models.Matchmaking, side string) *discordgo.MessageEmbed {
 	if n := gamechars.FuseName(fuse); n != "" {
 		fuseSlot = fmt.Sprintf("🔀 Fusión — **%s** ✔", n)
 	}
-
-	embed := &discordgo.MessageEmbed{
-		Color:       0x5865F2, // blurple: armando equipo
-		Title:       fmt.Sprintf("🧩 ARMA TU EQUIPO · FT %d", m.TargetFT),
-		Description: fmt.Sprintf("%s\n%s\n%s", charSlot("1️⃣ Personaje 1", c1), charSlot("2️⃣ Personaje 2", c2), fuseSlot),
-	}
-	if avatar != "" {
-		embed.Author = &discordgo.MessageEmbedAuthor{Name: tag, IconURL: avatar}
-	}
-	if complete {
-		embed.Color = 0x57F287 // verde: equipo listo
-		embed.Title = fmt.Sprintf("🔒 EQUIPO CONFIRMADO · FT %d", m.TargetFT)
-	} else {
-		embed.Footer = &discordgo.MessageEmbedFooter{
-			Text: "1️⃣ point · 2️⃣ assist · los menús se ocultan al completar los 3",
-		}
+	embed.Color = 0x5865F2
+	embed.Title = fmt.Sprintf("🧩 ARMA TU EQUIPO · FT %d", m.TargetFT)
+	embed.Description = fmt.Sprintf("%s\n%s\n%s", charSlot("1️⃣ Personaje 1", c1), charSlot("2️⃣ Personaje 2", c2), fuseSlot)
+	embed.Footer = &discordgo.MessageEmbedFooter{
+		Text: "La fusión define tu estilo — se muestra en la portada del embed",
 	}
 	return embed
 }
@@ -1443,55 +1525,43 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 		wc1, wc2, wfuse = m.P1Char1, m.P1Char2, m.P1Fuse
 	}
 
-	// Marcador con el ganador siempre primero.
+	// Marcador protagonista con el ganador siempre primero.
 	scoreW, scoreL := m.Score2, m.Score1
 	if m.WinnerDiscordID == m.Player1DiscordID {
 		scoreW, scoreL = m.Score1, m.Score2
 	}
-
-	// Línea de games: secuencia compacta; si se reportó directo (dropdowns), sin historial.
-	gamesLine := "games `" + reportSequence(&m) + "`"
-	if reportSequence(&m) == "" {
-		gamesLine = "games — *(reporte directo)*"
+	desc := fmt.Sprintf("**%d — %d**\n", scoreW, scoreL)
+	if seq := reportSequence(&m); seq != "" {
+		desc += "games `" + seq + "`\n"
 	}
+	desc += fmt.Sprintf("🏆 **%s** %s pts → **%d** · %s\n%s %s pts → **%d** · %s",
+		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW),
+		r.LoserTag, signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL))
 
+	wTag, wAvatar := sideInfo(&m, m.WinnerDiscordID)
 	embed := &discordgo.MessageEmbed{
-		Color: 0x5865F2,
-		Title: fmt.Sprintf("%s 🆚 %s", r.WinnerTag, r.LoserTag),
-		Description: fmt.Sprintf(
-			"🏆 **%s** `%d — %d` **%s**\nFT %d · %s · 💰 **%d pts**",
-			r.WinnerTag, scoreW, scoreL, r.LoserTag, m.TargetFT, gamesLine, m.PointsAtStake),
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   fmt.Sprintf("🏆 %s", r.WinnerTag),
-				Value:  fmt.Sprintf("%s pts → **%d** · %s", signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW)),
-				Inline: true,
-			},
-			{
-				Name:   fmt.Sprintf("💀 %s", r.LoserTag),
-				Value:  fmt.Sprintf("%s pts → **%d** · %s", signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL)),
-				Inline: true,
-			},
-		},
-	}
-
-	// Banner del equipo ganador DENTRO del embed (fusión → champ → champ).
-	files := []*discordgo.File{}
-	if banner := teamBannerFile(
-		loadIconCell("fuse", wfuse, 128),
-		loadIconCell("char", wc1, 128),
-		loadIconCell("char", wc2, 128)); banner != nil {
-		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://team_banner.png"}
-		files = append(files, banner)
-	}
-
-	// Footer: equipo ganador; el avatar del ganador como icono (URL, sin adjunto).
-	_, wAvatar := sideInfo(&m, m.WinnerDiscordID)
-	embed.Footer = &discordgo.MessageEmbedFooter{
-		Text: "🏆 Equipo ganador · " + gamechars.TeamLabel(wc1, wc2, wfuse),
+		Color:       0xFEE75C, // dorado
+		Title:       fmt.Sprintf("🏆 VICTORIA · FT %d", m.TargetFT),
+		Description: desc,
 	}
 	if wAvatar != "" {
-		embed.Footer.IconURL = wAvatar
+		embed.Author = &discordgo.MessageEmbedAuthor{Name: wTag, IconURL: wAvatar}
+	}
+
+	files := []*discordgo.File{}
+	// Miniatura: la fusión del ganador (portada del equipo).
+	if f := iconFilePNG("fusion.png", "fuse", wfuse, 80); f != nil {
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://fusion.png"}
+		files = append(files, f)
+	}
+	// Banner: los 2 champions del ganador con marco dorado.
+	if banner := bannerV2("team.png", color.RGBA{0xF0, 0xB2, 0x32, 0xFF},
+		loadIconCell("char", wc1, 140), loadIconCell("char", wc2, 140)); banner != nil {
+		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://team.png"}
+		files = append(files, banner)
+	}
+	embed.Footer = &discordgo.MessageEmbedFooter{
+		Text: "⚡ " + gamechars.TeamLabel(wc1, wc2, wfuse),
 	}
 
 	if _, err := s.ChannelMessageSendComplex(getMatchmakingResultChannelID(), &discordgo.MessageSend{
