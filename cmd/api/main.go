@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"smash-backend/internal/auth"
 	"smash-backend/internal/discord"
@@ -197,116 +198,98 @@ func main() {
 	discord.StartMatchmakingJanitor(dg, db)
 
 	// Abre el WebSocket en vivo con los servidores de Discord (Pone al bot EN LÍNEA)
-	err = dg.Open()
-	if err != nil {
-		log.Fatalf("❌ Error al conectar el bot con Discord: %v", err)
-	}
-	defer dg.Close() // Garantiza que la conexión se cierre al apagar la aplicación
+	// ==========================================
+	// 🚀 CONEXIÓN DEL BOT CON REINTENTOS
+	// Si Cloudflare/Discord bloquea la IP de Render (429 "error code: 1015"),
+	// el proceso NO muere: la API web sigue activa y el bot reintenta solo.
+	// ==========================================
+	dg.Debug = true  // Muestra logs de eventos de Discord (útil para depuración)
+	defer dg.Close() // Se cierra cuando termine main (aquí ya nunca muere por Discord)
 
-	log.Printf("🤖 ¡Bot de Discord conectado y en línea exitosamente!")
+	go func() {
+		// 1) Conectar con reintentos y backoff creciente
+		for attempt := 1; ; attempt++ {
+			if err := dg.Open(); err != nil {
+				wait := time.Duration(attempt) * 30 * time.Second
+				if wait > 10*time.Minute {
+					wait = 10 * time.Minute
+				}
+				log.Printf("❌ Error al conectar el bot con Discord: %v", err)
+				log.Printf("⏳ Reintento #%d en %v (la API web sigue activa)...", attempt, wait)
+				time.Sleep(wait)
+				continue
+			}
+			log.Printf("🤖 ¡Bot de Discord conectado y en línea exitosamente!")
+			break
+		}
 
-	// Construcción del comando de barra /ft con sus opciones (objetivo, rival y sala)
-	cmd := &discordgo.ApplicationCommand{
-		Name:        "ft",
-		Description: "Inicia un matchmaking FT (3 o 5) contra un rival",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionInteger,
-				Name:        "objetivo",
-				Description: "Formato de la reta (3 o 5)",
-				Required:    true,
-				Choices: []*discordgo.ApplicationCommandOptionChoice{
-					{Name: "FT 3", Value: 3},
-					{Name: "FT 5", Value: 5},
-				},
-			},
-			{
-				Type:        discordgo.ApplicationCommandOptionUser,
-				Name:        "rival",
-				Description: "Usuario contra el que jugarás",
-				Required:    true,
-			},
-			{
-				// Sala: código de la sala que crea el retador. Llega por DM al rival
-				// (y luego en el hilo del combate) para que solo lo copie y entre.
-				Type:        discordgo.ApplicationCommandOptionString,
-				Name:        "sala",
-				Description: "Código de la sala para que tu rival copie y entre (opcional)",
-				Required:    false,
-			},
-		},
-	}
-	// Limpieza: /cerrarset fue eliminado (los mods cierran con el botón 🏳️ Cerrar set).
-	// Se borra del servidor si quedó registrado por versiones anteriores.
-	if guildID != "" {
-		if existing, err := dg.ApplicationCommands(dg.State.User.ID, guildID); err == nil {
-			for _, c := range existing {
-				if c.Name == "cerrarset" {
-					_ = dg.ApplicationCommandDelete(dg.State.User.ID, guildID, c.ID)
+		// 2) Todo lo que necesita al bot EN LÍNEA va aquí adentro
+		//    (dg.State.User es nil hasta que Open() tiene éxito —
+		//     por eso el registro de comandos NO puede ir antes).
+
+		// Limpieza: /cerrarset fue eliminado (los mods cierran con el botón 🏳️ Cerrar set).
+		if guildID != "" {
+			if existing, err := dg.ApplicationCommands(dg.State.User.ID, guildID); err == nil {
+				for _, c := range existing {
+					if c.Name == "cerrarset" {
+						_ = dg.ApplicationCommandDelete(dg.State.User.ID, guildID, c.ID)
+					}
 				}
 			}
 		}
-	}
 
-	// Registra los comandos directamente en tu servidor (Guild Command) para disponibilidad instantánea.
-	cmds := []*discordgo.ApplicationCommand{cmd}
-	for _, c := range cmds {
+		// Construcción del comando de barra /ft con sus opciones
+		cmd := &discordgo.ApplicationCommand{
+			Name:        "ft",
+			Description: "Inicia un matchmaking FT (3 o 5) contra un rival",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Name:        "objetivo",
+					Description: "Formato de la reta (3 o 5)",
+					Required:    true,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "FT 3", Value: 3},
+						{Name: "FT 5", Value: 5},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "rival",
+					Description: "Usuario contra el que jugarás",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "sala",
+					Description: "Código de la sala para que tu rival copie y entre (opcional)",
+					Required:    false,
+				},
+			},
+		}
+
+		// Registra los comandos directamente en tu servidor (Guild Command)
+		cmds := []*discordgo.ApplicationCommand{cmd}
+		for _, c := range cmds {
+			if guildID != "" {
+				dg.ApplicationCommandCreate(dg.State.User.ID, guildID, c)
+			} else {
+				dg.ApplicationCommandCreate(dg.State.User.ID, "", c)
+			}
+		}
 		if guildID != "" {
-			dg.ApplicationCommandCreate(dg.State.User.ID, guildID, c)
+			log.Printf("📌 Comandos /ft registrados instantáneamente para el servidor: %s", guildID)
 		} else {
-			dg.ApplicationCommandCreate(dg.State.User.ID, "", c)
-		}
-	}
-	if guildID != "" {
-		log.Printf("📌 Comandos /ft registrados instantáneamente para el servidor: %s", guildID)
-	} else {
-		log.Println("⚠️ DISCORD_GUILD_ID no configurado; los comandos se registraron globalmente (pueden tardar en aparecer).")
-	}
-
-	// Ejecuta la sincronización de Start.gg al iniciar en una rutina asíncrona (goroutine)
-	if startGGToken != "" {
-		go runFullSync(startGGToken, db, dg)
-	} else {
-		log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el .env")
-	}
-
-	// ==========================================
-	// RUTAS HTTP (API REST)
-	// ==========================================
-
-	// GET /api/rankings/2xko -> Retorna la tabla de posiciones de TORNEOS en formato JSON
-	http.HandleFunc("/api/rankings/2xko", func(w http.ResponseWriter, r *http.Request) {
-		HandleGetRankings(w, r, "2xko_online")
-	})
-
-	// GET /api/rankings/matchmaking -> Retorna la tabla de posiciones de MATCHMAKING (/ft)
-	http.HandleFunc("/api/rankings/matchmaking", HandleGetMatchmakingRankings)
-
-	// GET /api/tournaments/count -> Retorna el total de eventos procesados en la base de datos
-	http.HandleFunc("/api/tournaments/count", func(w http.ResponseWriter, r *http.Request) {
-		var n int64
-		db.Table("processed_events").Count(&n)
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		json.NewEncoder(w).Encode(map[string]int64{"count": n})
-	})
-
-	// GET /api/sync -> Permite disparar la sincronización manualmente llamando al endpoint HTTP
-	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		if startGGToken == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"status": "error", "message": "STARTGG_TOKEN no está configurado"}`))
-			return
+			log.Println("⚠️ DISCORD_GUILD_ID no configurado; los comandos se registraron globalmente (pueden tardar en aparecer).")
 		}
 
-		// Ejecutamos de forma síncrona (sin 'go') para que HTTP espere a que termine el proceso completo
-		runFullSync(startGGToken, db, dg)
-
-		w.Write([]byte(`{"status": "success", "message": "¡Sincronización completada con éxito!"}`))
-	})
+		// 3) Sincronización de Start.gg (requiere la sesión del bot abierta)
+		if startGGToken != "" {
+			runFullSync(startGGToken, db, dg)
+		} else {
+			log.Println("⚠️ Advertencia: STARTGG_TOKEN no está configurado en el .env")
+		}
+	}()
 
 	// ==========================================
 	// 🔐 AUTENTICACIÓN CON DISCORD + PERFILES
