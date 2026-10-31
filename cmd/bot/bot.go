@@ -94,6 +94,9 @@ func main() {
 	// Janitor de matchmaking: auto-confirmaciones, cierres y cancelaciones automáticas
 	discord.StartMatchmakingJanitor(dg, db)
 
+	// 🌐 Worker de la cola web: lanza en Discord los sets confirmados desde la página
+	discord.StartWebQueueWorker(dg, db)
+
 	go func() {
 		// 1) Conectar con reintentos (backoff 30 s -> 10 min).
 		//    Si Cloudflare bloquea la IP del host (429 "error code: 1015"),

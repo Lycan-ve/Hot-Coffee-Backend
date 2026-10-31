@@ -885,62 +885,37 @@ func isMod(i *discordgo.InteractionCreate) bool {
 // 1. ACEPTAR RETA
 // ---------------------------------------------------------------------------
 
-func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
-	// Se "reclama" la reta cambiando el estado dentro de la transacción: un doble clic no crea dos hilos.
-	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
-		if user.ID != m.Player2DiscordID {
-			return userError{"❌ Solo el jugador retado puede aceptar esta solicitud."}
-		}
-		if m.Status != statusPending {
-			return userError{"⚠️ Esta solicitud ya no está pendiente."}
-		}
-		m.Status = statusInProgress
-		return nil
-	})
-	if err != nil {
-		respondError(s, i, err)
-		return
-	}
-
-	revert := func(msg string) {
-		db.Model(&models.Matchmaking{}).Where("id = ?", match.ID).Update("Status", statusPending)
-		replyEphemeral(s, i, msg)
-	}
-
+// launchMatchThread crea TODO el espacio de combate de una reta aceptada:
+// mensaje en el canal, hilo, paneles de equipo (DM privado + hilo público),
+// panel de games y registro de los IDs de los paneles.
+// Es el flujo de handleAccept sin la interacción de Discord: lo usan las
+// retas /ft y los sets creados desde la cola web.
+func launchMatchThread(s *discordgo.Session, db *gorm.DB, match models.Matchmaking) (models.Matchmaking, error) {
 	channelID := getMatchmakingChannelID()
 	baseMsg, err := s.ChannelMessageSend(channelID,
-		fmt.Sprintf("⚔️ **¡RETA ACEPTADA!**\n<@%s> vs <@%s> (FT %d)", match.Player1DiscordID, match.Player2DiscordID, match.TargetFT))
+		fmt.Sprintf("⚔️ **¡RETA ACEPTADA!**\n<@%s> vs <@%s> (FT %d)",
+			match.Player1DiscordID, match.Player2DiscordID, match.TargetFT))
 	if err != nil {
-		log.Printf("❌ No se pudo escribir en el canal de matchmaking: %v\n", err)
-		revert("❌ Error al escribir en el canal de matchmaking público.")
-		return
+		return match, fmt.Errorf("error al escribir en el canal de matchmaking: %w", err)
 	}
 
 	threadName := fmt.Sprintf("🥊 %s vs %s (FT %d)", match.Player1Tag, match.Player2Tag, match.TargetFT)
 	thread, err := s.MessageThreadStart(channelID, baseMsg.ID, threadName, 1440)
 	if err != nil {
-		log.Printf("❌ No se pudo crear el hilo: %v\n", err)
 		_ = s.ChannelMessageDelete(channelID, baseMsg.ID)
-		revert("❌ Error al crear el hilo en Discord.")
-		return
+		return match, fmt.Errorf("error al crear el hilo: %w", err)
 	}
+	match.ThreadID = thread.ID
 
-	// Selección PRIVADA: la ficha con menús va por MD — el rival no ve tus picks
-	// hasta que confirmas los 3. En el hilo solo quedan paneles de estado.
-	setupDM := func(side string) bool {
-		return sendTeamPanelDM(s, match, side)
-	}
-	// El retado (P2) siempre elige por MD. El retador (P1) ya eligió desde el
-	// panel del /ft en el 99% de los casos: MD SOLO como fallback si no terminó.
-	p2DM := setupDM("p2")
+	// Selección PRIVADA: la ficha con menús va por MD — el rival no ve tus
+	// picks hasta que confirmas los 3. En el hilo solo quedan paneles de estado.
+	p2DM := sendTeamPanelDM(s, match, "p2")
 	p1DM := false
 	if !match.P1TeamComplete() {
-		p1DM = setupDM("p1")
+		p1DM = sendTeamPanelDM(s, match, "p1")
 	}
 
-	// Paneles públicos del hilo: estado SIN picks; si el MD falló, ahí van los menús.
 	pubPanel := func(side string, viaDM bool) *discordgo.MessageSend {
-		// El retador ya confirmó desde el /ft: su ficha se revela de una vez.
 		if side == "p1" && match.P1TeamComplete() {
 			embed, files := teamPanelEmbedWithBanner(match, "p1")
 			return &discordgo.MessageSend{
@@ -979,6 +954,7 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 		Embeds: []*discordgo.MessageEmbed{gpEmbed},
 		Files:  gpFiles,
 	})
+
 	if !p1DM && !match.P1TeamComplete() {
 		log.Printf("⚠️ No se pudo enviar el panel de equipo por MD a %s: usa el panel del /ft.\n", match.Player1Tag)
 	}
@@ -996,27 +972,78 @@ func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm
 	}
 
 	now := time.Now()
-	updates := map[string]interface{}{"ThreadID": thread.ID, "LastRoundAt": &now}
+	match.LastRoundAt = &now
 	if err1 == nil {
-		updates["TeamPanelMessageID1"] = teamP1.ID
+		match.TeamPanelMessageID1 = teamP1.ID
 	}
 	if err2 == nil {
-		updates["TeamPanelMessageID2"] = teamP2.ID
+		match.TeamPanelMessageID2 = teamP2.ID
 	}
 	if err3 == nil {
-		updates["PanelMessageID"] = gamePanel.ID
+		match.PanelMessageID = gamePanel.ID
+	}
+
+	updates := map[string]interface{}{
+		"thread_id":     match.ThreadID,
+		"last_round_at": match.LastRoundAt,
+	}
+	if match.TeamPanelMessageID1 != "" {
+		updates["team_panel_message_id_1"] = match.TeamPanelMessageID1
+	}
+	if match.TeamPanelMessageID2 != "" {
+		updates["team_panel_message_id_2"] = match.TeamPanelMessageID2
+	}
+	if match.PanelMessageID != "" {
+		updates["panel_message_id"] = match.PanelMessageID
 	}
 	if err := db.Model(&models.Matchmaking{}).Where("id = ?", match.ID).Updates(updates).Error; err != nil {
 		log.Printf("❌ No se pudieron guardar los paneles de la reta %d: %v\n", match.ID, err)
 	}
+	return match, nil
+}
 
-	editMessage(s, i, fmt.Sprintf("✅ ¡Has aceptado la reta! Espacio de combate creado: <#%s>", thread.ID), nil)
+// ---------------------------------------------------------------------------
+// 1. ACEPTAR RETA
+// ---------------------------------------------------------------------------
+
+func handleAccept(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
+	// Se "reclama" la reta cambiando el estado dentro de la transacción: un
+	// doble clic no crea dos hilos.
+	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
+		if user.ID != m.Player2DiscordID {
+			return userError{"❌ Solo el jugador retado puede aceptar esta solicitud."}
+		}
+		if m.Status != statusPending {
+			return userError{"⚠️ Esta solicitud ya no está pendiente."}
+		}
+		m.Status = statusInProgress
+		return nil
+	})
+	if err != nil {
+		respondError(s, i, err)
+		return
+	}
+
+	match, err = launchMatchThread(s, db, match)
+	if err != nil {
+		log.Printf("❌ No se pudo crear el hilo de la reta %d: %v\n", match.ID, err)
+		if match.ThreadID == "" {
+			// El hilo no llegó a existir: la reta vuelve a estar pendiente.
+			db.Model(&models.Matchmaking{}).Where("id = ?", match.ID).Update("Status", statusPending)
+			replyEphemeral(s, i, "❌ Error al crear el hilo en Discord. Inténtalo de nuevo.")
+		} else {
+			replyEphemeral(s, i, "⚠️ El hilo se creó pero hubo un problema con los paneles. Revisa el canal de matchmaking.")
+		}
+		return
+	}
+
+	editMessage(s, i, fmt.Sprintf("✅ ¡Has aceptado la reta! Espacio de combate creado: <#%s>", match.ThreadID), nil)
 
 	if dm, err := s.UserChannelCreate(match.Player1DiscordID); err == nil {
 		if match.P1TeamComplete() {
-			_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Tu equipo ya está confirmado — ¡entra al hilo: <#%s>", match.Player2Tag, match.TargetFT, thread.ID))
+			_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Tu equipo ya está confirmado — ¡entra al hilo: <#%s>", match.Player2Tag, match.TargetFT, match.ThreadID))
 		} else {
-			_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Termina de armar tu equipo (panel del /ft o este MD) — hilo: <#%s>", match.Player2Tag, match.TargetFT, thread.ID))
+			_, _ = s.ChannelMessageSend(dm.ID, fmt.Sprintf("⚡ **%s** ha aceptado tu reta (FT %d). Termina de armar tu equipo (panel del /ft o este MD) — hilo: <#%s>", match.Player2Tag, match.TargetFT, match.ThreadID))
 		}
 	}
 }

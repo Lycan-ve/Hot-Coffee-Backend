@@ -172,6 +172,19 @@ func parseToken(raw string) (string, error) {
 	return sub, nil
 }
 
+// UserIDFromRequest valida el header "Authorization: Bearer <jwt>" y
+// devuelve el Discord ID del usuario. Versión exportada para otros
+// paquetes de la API (p. ej. la cola de matchmaking web).
+func UserIDFromRequest(r *http.Request) (string, bool) {
+	return bearerDiscordID(r)
+}
+
+// PreflightCors escribe los headers CORS y responde OPTIONS si corresponde.
+// Devuelve true si la petición ya fue respondida (preflight).
+func PreflightCors(w http.ResponseWriter, r *http.Request) bool {
+	return setCors(w, r)
+}
+
 // ---------------------- Utilidades HTTP ----------------------
 
 func randHex(n int) string {

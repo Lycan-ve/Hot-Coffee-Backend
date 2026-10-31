@@ -12,6 +12,7 @@ import (
 	"smash-backend/internal/auth"
 	"smash-backend/internal/database"
 	"smash-backend/internal/models"
+	"smash-backend/internal/webqueue"
 
 	"github.com/joho/godotenv"
 	"gorm.io/gorm"
@@ -136,6 +137,9 @@ func main() {
 
 	// 🔐 Login con Discord + perfiles (módulo de login)
 	auth.RegisterRoutes(db)
+
+	// 🌐 Cola de matchmaking web: el sistema encuentra al rival (como Smash the Peak)
+	webqueue.RegisterRoutes(db)
 
 	// Sirve los íconos de rangos (Rangos/*.png) para el rank display del frontend
 	http.Handle("/Rangos/", http.StripPrefix("/Rangos/", http.FileServer(http.Dir("Rangos"))))
