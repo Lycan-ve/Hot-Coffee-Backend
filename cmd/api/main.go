@@ -47,7 +47,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 			JOIN (
 			  SELECT event_id, ROW_NUMBER() OVER (ORDER BY event_id) AS tournament_number
 			  FROM processed_events
-			) pe ON pe.event_id = pr.event_id AND pe.league = pr.league
+			) pe ON pe.event_id = pr.event_id
 			WHERE p.league = ? AND pe.tournament_number BETWEEN ? AND ?
 			GROUP BY p.id, p.league, p.profile_url
 			ORDER BY points DESC`,
