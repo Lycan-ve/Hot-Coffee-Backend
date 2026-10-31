@@ -64,6 +64,11 @@ func startHealthServer() {
 func main() {
 	// Carga las variables del archivo .env si se ejecuta localmente
 	godotenv.Load()
+
+	// Health server PRIMERO: Back4App hace el health check a los ~6 s,
+	// hay que abrir el puerto antes de conectar a la base de datos
+	go startHealthServer()
+
 	db := database.Connect()
 
 	startGGToken := os.Getenv("STARTGG_TOKEN")
@@ -73,9 +78,6 @@ func main() {
 	if botToken == "" {
 		log.Fatal("❌ DISCORD_BOT_TOKEN no está configurado en el .env")
 	}
-
-	// Health server en segundo plano (para UptimeRobot)
-	go startHealthServer()
 
 	// ==========================================
 	// 🚀 CONEXIÓN PERSISTENTE DEL BOT DE DISCORD
