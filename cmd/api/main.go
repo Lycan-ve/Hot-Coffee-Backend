@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 
+	"smash-backend/internal/auth"
 	"smash-backend/internal/discord"
 	"smash-backend/internal/models"
 	"smash-backend/internal/startgg"
@@ -46,6 +47,7 @@ func InitDatabase() {
 		&models.PlayerResult{},
 		&models.Matchmaking{},
 		&models.MatchmakingPlayer{},
+		&models.User{},
 	); err != nil {
 		log.Fatal("❌ Error en la migración automática:", err)
 	}
@@ -305,6 +307,14 @@ func main() {
 
 		w.Write([]byte(`{"status": "success", "message": "¡Sincronización completada con éxito!"}`))
 	})
+
+	// ==========================================
+	// 🔐 AUTENTICACIÓN CON DISCORD + PERFILES
+	// ==========================================
+	auth.RegisterRoutes(db)
+
+	// Sirve los íconos de rangos (Rangos/*.png) para el rank display del frontend
+	http.Handle("/Rangos/", http.StripPrefix("/Rangos/", http.FileServer(http.Dir("Rangos"))))
 
 	// Inicia el servidor HTTP web (Render inyecta PORT por env; en local usa 8080).
 	port := os.Getenv("PORT")
