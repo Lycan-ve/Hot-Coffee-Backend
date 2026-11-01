@@ -1,23 +1,18 @@
-name: Keep-alive 24/7
-
+name: Build bot binary
 on:
-  schedule:
-    # Cada 5 minutos, desplazado 2 min para evitar los minutos
-    # mas saturados de GitHub Actions (menos retraso).
-    - cron: "2-59/5 * * * *"
+  push:
+    branches: [main]
   workflow_dispatch: {}
-
 jobs:
-  ping:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping al backend en Render
-        env:
-          BACKEND_URL: https://hot-coffee-backend.onrender.com
-        run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 "$BACKEND_URL/api/tournaments/count")
-          echo "GET /api/tournaments/count -> HTTP $code"
-          if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
-            echo "WARN: la API no respondio bien, reintentando con la raiz..."
-            curl -s -o /dev/null -w 'GET / -> HTTP %{http_code}\n' --max-time 120 "$BACKEND_URL/"
-          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go build -tags netgo -ldflags '-s -w' -o bot ./cmd/bot
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bot-latest
+          files: bot
