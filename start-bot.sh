@@ -3,6 +3,7 @@ echo "==== DIAGNOSTICO BOT-HOSTING ===="
 [ -n "$DATABASE_URL" ]      && echo "DATABASE_URL: OK"      || echo "DATABASE_URL: FALTA"
 [ -n "$DISCORD_BOT_TOKEN" ] && echo "DISCORD_BOT_TOKEN: OK" || echo "DISCORD_BOT_TOKEN: FALTA"
 [ -n "$STARTGG_TOKEN" ]     && echo "STARTGG_TOKEN: OK"     || echo "STARTGG_TOKEN: FALTA"
+[ -n "$DISCORD_TOURNAMENT_CHANNEL_ID" ] && echo "DISCORD_TOURNAMENT_CHANNEL_ID: OK" || echo "DISCORD_TOURNAMENT_CHANNEL_ID: FALTA"
 
 echo "==== DIAGNOSTICO DISCORD ===="
 if command -v curl >/dev/null 2>&1; then

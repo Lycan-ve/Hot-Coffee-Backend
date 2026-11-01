@@ -19,7 +19,6 @@ RUN chmod +x start.sh
 # Archivos que el bot lee del disco en tiempo de ejecución
 COPY Personajes ./Personajes
 COPY Fusion ./Fusion
-COPY "Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json" ./
 
 # Iconos de rangos que la API sirve en /Rangos/
 COPY Rangos ./Rangos

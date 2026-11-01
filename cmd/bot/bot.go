@@ -38,8 +38,16 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 		return
 	}
 
-	// 2. Sincronizar utilizando el archivo JSON de Discord
-	startgg.SyncTournamentsFromDiscordJSON("Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json", startGGToken, db, activeMembers)
+	// 2. Sincroniza leyendo los links de Start.gg publicados en el canal de torneos
+	//    de Discord (canal configurado en la variable DISCORD_TOURNAMENT_CHANNEL_ID)
+	channelID := os.Getenv("DISCORD_TOURNAMENT_CHANNEL_ID")
+	if channelID == "" {
+		log.Println("🛑 DISCORD_TOURNAMENT_CHANNEL_ID no está configurado en el .env: se cancela la sync de torneos.")
+		return
+	}
+	messages := discord.FetchTournamentMessagesFromChannel(dgSession, channelID)
+	tournaments := startgg.ExtractTournamentsAndImages(messages)
+	startgg.SyncTournamentsFromDiscordLive(tournaments, startGGToken, db, activeMembers)
 
 	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
 	startgg.SyncManualTournaments(db, activeMembers)
@@ -169,7 +177,7 @@ func main() {
 		if guildID != "" {
 			log.Printf("📌 Comandos /ft registrados instantáneamente para el servidor: %s", guildID)
 		} else {
-			log.Println("⚠️ DISCORD_GUILD_ID no configurado; los comandos se registraron globalmente (pueden tardar en aparecer).")
+			log.Println("⚠️ DISCORD_GUILD_ID no configurado; los comandos se registraron globalmente (pueden tardar en aparecer.")
 		}
 
 		// 4) Sincronización de Start.gg: al arrancar y luego cada 6 horas
