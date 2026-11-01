@@ -1,6 +1,5 @@
 # ---------- Build ----------
 FROM golang:1.26-alpine AS builder
-# (go.mod exige 1.26.5; el 1.24 que tenías es anterior)
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -21,6 +20,9 @@ RUN chmod +x start.sh
 COPY Personajes ./Personajes
 COPY Fusion ./Fusion
 COPY "Hot Coffee _ 2XKO - TORNEOS HOT COFFEE - 📊│hot-coffee-torneos [1430651477612826624].json" ./
+
+# Iconos de rangos que la API sirve en /Rangos/
+COPY Rangos ./Rangos
 
 EXPOSE 8080
 ENTRYPOINT ["./start.sh"]
