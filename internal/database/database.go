@@ -43,6 +43,7 @@ func Connect() *gorm.DB {
 		&models.SyncRequest{},         // solicitudes de sync manual desde la web
 		&models.MatchmakingQueue{},    // 🆕 cola web de matchmaking
 		&models.MatchmakingProposal{}, // 🆕 emparejamientos de la cola web
+		&models.MatchmakingMessage{},  // 🆕 chat del set web
 	); err != nil {
 		log.Fatal("❌ Error en la migración automática:", err)
 	}

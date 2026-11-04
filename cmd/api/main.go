@@ -11,7 +11,9 @@ import (
 
 	"smash-backend/internal/auth"
 	"smash-backend/internal/database"
+	"smash-backend/internal/gamechars"
 	"smash-backend/internal/models"
+	"smash-backend/internal/webmatch"
 	"smash-backend/internal/webqueue"
 
 	"github.com/joho/godotenv"
@@ -92,6 +94,23 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(players)
 }
 
+// HandleGetRoster expone el roster de 2XKO (personajes y fusiones) para que
+// la web arme los equipos con los mismos IDs que usa el bot.
+func HandleGetRoster(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	chars := make([]map[string]string, 0, len(gamechars.Characters))
+	for _, c := range gamechars.Characters {
+		chars = append(chars, map[string]string{"id": c.ID, "name": c.Name})
+	}
+	fuses := make([]map[string]string, 0, len(gamechars.Fuses))
+	for _, f := range gamechars.Fuses {
+		fuses = append(fuses, map[string]string{"id": f.ID, "name": f.Name})
+	}
+	json.NewEncoder(w).Encode(map[string]any{"characters": chars, "fuses": fuses})
+}
+
 func main() {
 	// Carga las variables del archivo .env si se ejecuta localmente
 	godotenv.Load()
@@ -108,6 +127,9 @@ func main() {
 
 	// GET /api/rankings/matchmaking -> Retorna la tabla de posiciones de MATCHMAKING (/ft)
 	http.HandleFunc("/api/rankings/matchmaking", HandleGetMatchmakingRankings)
+
+	// GET /api/game/roster -> Personajes y fusiones de 2XKO (armado de equipos en la web)
+	http.HandleFunc("/api/game/roster", HandleGetRoster)
 
 	// GET /api/tournaments/count -> Retorna el total de eventos procesados en la base de datos
 	http.HandleFunc("/api/tournaments/count", func(w http.ResponseWriter, r *http.Request) {
@@ -141,10 +163,16 @@ func main() {
 	// 🌐 Cola de matchmaking web: el sistema encuentra al rival (como Smash the Peak)
 	webqueue.RegisterRoutes(db)
 
+	// 🕹️ Sala del set 100% web: equipo, chat y reporte dentro de la página
+	//    (los sets de la cola ya NO dependen del bot de Discord)
+	webmatch.RegisterRoutes(db)
+
 	// Sirve los íconos de rangos (Rangos/*.png) para el rank display del frontend
 	http.Handle("/Rangos/", http.StripPrefix("/Rangos/", http.FileServer(http.Dir("Rangos"))))
 	// Sirve los íconos de fuses para el historial de equipos del perfil.
 	http.Handle("/Fusion/", http.StripPrefix("/Fusion/", http.FileServer(http.Dir("Fusion"))))
+	// Sirve los íconos de PERSONAJES para armar el equipo en la web (2XKO).
+	http.Handle("/Personajes/", http.StripPrefix("/Personajes/", http.FileServer(http.Dir("Personajes"))))
 
 	// Inicia el servidor HTTP web (Render inyecta PORT por env; en local usa 8080).
 	port := os.Getenv("PORT")

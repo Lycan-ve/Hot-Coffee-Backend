@@ -5,8 +5,11 @@ import "time"
 // Matchmaking es una reta /ft entre dos usuarios de Discord.
 // Se identifica a los jugadores SOLO por su ID de Discord.
 type Matchmaking struct {
-	ID               uint   `gorm:"primaryKey" json:"id"`
-	League           string `json:"league"`
+	ID     uint   `gorm:"primaryKey" json:"id"`
+	League string `json:"league"`
+	// Origen del set: "discord" (bot: /ft o hilo) o "web" (100% página:
+	// equipo, chat y reporte sin depender del bot).
+	Source           string `json:"source"`
 	Player1DiscordID string `gorm:"index" json:"player1_discord_id"`
 	Player1Tag       string `json:"player1_tag"`
 	Player1Avatar    string `json:"player1_avatar"`
@@ -37,17 +40,18 @@ type Matchmaking struct {
 	P2Fuse  string `json:"p2_fuse"`
 	// ORDEN de las victorias, JSON de lados: "[1,2,1]" = P1 ganó el game 1, P2 el 2, P1 el 3.
 	RoundHistory string `json:"round_history"`
-	// Game reportado esperando verificación (1 = ganó Player1, 2 = Player2, 0 = ninguno).
+	// Game reportado esperando verificación (1 = ganó Player1, 2 = Player2,
+	// 3 = propuesta de RESULTADO FINAL en la web, 0 = ninguno).
 	PendingGameWinner int `json:"pending_game_winner"`
 	// Quién reportó el game pendiente: SOLO el otro jugador puede confirmarlo.
 	PendingReportedBy string `json:"pending_reported_by"`
-	// Reporte del set completo con 2 dropdowns (games finales elegidos; -1 = sin elegir).
+	// Reporte del set completo (games finales elegidos; -1 = sin elegir).
 	FinalPick1 int `json:"final_pick_1"`
 	FinalPick2 int `json:"final_pick_2"`
 	// Relojes del janitor (en la BD: sobreviven reinicios del bot).
 	CloseRequestedAt *time.Time `json:"close_requested_at"` // propuesta de cierre: se cierra a los 2 min
 	CloseRequestedBy string     `json:"close_requested_by"` // quién pidió cerrar el set
-	LastRoundAt      *time.Time `json:"last_round_at"`      // 2 h sin reportar = set cancelado
+	LastRoundAt      *time.Time `json:"last_round_at"`      // inactividad = set cancelado
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 }

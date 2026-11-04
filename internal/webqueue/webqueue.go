@@ -1,8 +1,3 @@
-// Package webqueue implementa la COLA DE MATCHMAKING de la web: el jugador
-// entra a la cola, el sistema le busca un rival de puntos similares (el radio
-// de búsqueda crece con la espera, como en Smash the Peak) y, tras la doble
-// aceptación, el BOT de Discord crea el hilo del set con paneles, equipos y
-// reporte — el mismo flujo de /ft.
 package webqueue
 
 import (
@@ -292,8 +287,9 @@ func sweep() {
 		requeue(db, p.Player2DiscordID, p.TargetFT, p.CreatedAt)
 	}
 
-	// 3) CONFIRMED/LAUNCHING atascadas > 10 min (bot caído): se cancela todo
-	//    para que los jugadores puedan volver a la cola.
+	// 3) CONFIRMED/LAUNCHING atascadas > 10 min: se cancela todo para que
+	//    los jugadores puedan volver a la cola (solo aplica a propuestas
+	//    viejas lanzadas al bot; el flujo web pasa directo a LAUNCHED).
 	var stuck []models.MatchmakingProposal
 	db.Where("status IN ? AND created_at <= ?",
 		[]string{proposalConfirmed, proposalLaunching}, now.Add(-10*time.Minute)).Find(&stuck)
@@ -431,6 +427,24 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]any{"status": "idle"}
 
+	// 0) Set en curso: la sala del set vive en la propia página (si nació de
+	//    la cola web, "web": true) o sigue en el hilo de Discord (si lo
+	//    lanzó el bot con una propuesta antigua).
+	var active models.Matchmaking
+	if err := db.Where("status IN ? AND (player1_discord_id = ? OR player2_discord_id = ?)",
+		[]string{"IN_PROGRESS", "PENDING_VERIFY", "PENDING_CLOSE"}, discordID, discordID).
+		Order("id DESC").First(&active).Error; err == nil {
+		resp["status"] = "matched"
+		resp["match"] = map[string]any{
+			"id":        active.ID,
+			"web":       active.Source == "web",
+			"threadId":  active.ThreadID,
+			"threadUrl": threadURL(active.ThreadID),
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	// 1) Propuesta activa (WAITING/CONFIRMED): pantalla de "rival encontrado".
 	p, err := activeProposal(discordID)
 	if err != nil {
@@ -480,32 +494,7 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3) Última propuesta LANZADA: muestra el enlace al hilo (si es reciente
-	//    o el set sigue activo).
-	var launched models.MatchmakingProposal
-	if err := db.Where("(player1_discord_id = ? OR player2_discord_id = ?)", discordID, discordID).
-		Order("id DESC").First(&launched).Error; err == nil && launched.Status == proposalLaunched {
-		show := time.Since(launched.CreatedAt) < 15*time.Minute
-		if !show && launched.MatchID > 0 {
-			var m models.Matchmaking
-			if err := db.Where("id = ? AND status IN ?", launched.MatchID, activeMatchStatuses).
-				First(&m).Error; err == nil {
-				show = true
-			}
-		}
-		if show {
-			resp["status"] = "matched"
-			resp["match"] = map[string]any{
-				"id":        launched.MatchID,
-				"threadId":  launched.ThreadID,
-				"threadUrl": threadURL(launched.ThreadID),
-			}
-			writeJSON(w, http.StatusOK, resp)
-			return
-		}
-	}
-
-	// 4) Propuesta fallida reciente (el bot no pudo crear el hilo).
+	// 3) Propuesta fallida reciente (sets viejos que esperaban al bot).
 	var failed models.MatchmakingProposal
 	if err := db.Where("status = ? AND (player1_discord_id = ? OR player2_discord_id = ?)",
 		proposalFailed, discordID, discordID).
@@ -565,9 +554,12 @@ func handleAccept(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if p.Accept1 && p.Accept2 {
-			// Doble aceptación: se confirma y se crea la reta que el bot lanzará.
+			// Doble aceptación: el set se abre AQUÍ MISMO, 100% en la web
+			// (equipo, chat y reporte en la página — sin esperar al bot).
+			now := time.Now()
 			match := models.Matchmaking{
 				League:           matchmakingLeague,
+				Source:           "web",
 				Player1DiscordID: p.Player1DiscordID,
 				Player1Tag:       p.Player1Tag,
 				Player1Avatar:    p.Player1Avatar,
@@ -576,12 +568,13 @@ func handleAccept(w http.ResponseWriter, r *http.Request) {
 				Player2Avatar:    p.Player2Avatar,
 				TargetFT:         p.TargetFT,
 				PointsAtStake:    p.PointsAtStake,
-				Status:           "PENDING", // el bot la reclama (→ IN_PROGRESS) al crear el hilo
+				Status:           "IN_PROGRESS",
+				LastRoundAt:      &now,
 			}
 			if err := tx.Create(&match).Error; err != nil {
 				return err
 			}
-			p.Status = proposalConfirmed
+			p.Status = proposalLaunched
 			p.MatchID = match.ID
 		}
 		return tx.Save(&p).Error
