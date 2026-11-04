@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"smash-backend/internal/gamechars"
 	"smash-backend/internal/models"
 	"smash-backend/internal/ranks"
 
@@ -321,8 +323,200 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, frontendURL()+"/perfil#token="+url.QueryEscape(jwtStr), http.StatusTemporaryRedirect)
 }
 
-// writeProfile arma la respuesta de perfil: usuario + stats de matchmaking + rango.
-func writeProfile(w http.ResponseWriter, discordID string) {
+type profileCharacter struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type profileTeam struct {
+	Point  profileCharacter `json:"point"`
+	Assist profileCharacter `json:"assist"`
+	Fuse   profileCharacter `json:"fuse"`
+}
+
+type profileFight struct {
+	ID             uint        `json:"id"`
+	PlayedAt       time.Time   `json:"playedAt"`
+	Result         string      `json:"result"`
+	ScoreFor       int         `json:"scoreFor"`
+	ScoreAgainst   int         `json:"scoreAgainst"`
+	TargetFT       int         `json:"targetFT"`
+	OpponentTag    string      `json:"opponentTag"`
+	OpponentAvatar string      `json:"opponentAvatar"`
+	PlayerTeam     profileTeam `json:"playerTeam"`
+	OpponentTeam   profileTeam `json:"opponentTeam"`
+}
+
+type profileTournamentRow struct {
+	EventID   int    `json:"eventId"`
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	Points    int    `json:"points"`
+	Placement int    `json:"placement"`
+}
+
+type profileTournament struct {
+	EventID        int    `json:"eventId"`
+	Name           string `json:"name"`
+	Slug           string `json:"slug"`
+	Points         int    `json:"points"`
+	Placement      int    `json:"placement"`
+	PlacementLabel string `json:"placementLabel"`
+	IsWinner       bool   `json:"isWinner"`
+}
+
+func makeProfileTeam(pointID, assistID, fuseID string) profileTeam {
+	return profileTeam{
+		Point:  profileCharacter{ID: pointID, Name: gamechars.CharacterName(pointID)},
+		Assist: profileCharacter{ID: assistID, Name: gamechars.CharacterName(assistID)},
+		Fuse:   profileCharacter{ID: fuseID, Name: gamechars.FuseName(fuseID)},
+	}
+}
+
+func getProfileFights(discordID string) []profileFight {
+	fights := make([]profileFight, 0)
+	var records []models.Matchmaking
+	if err := db.
+		Where("status = ? AND (player1_discord_id = ? OR player2_discord_id = ?)", "FINISHED", discordID, discordID).
+		Order("created_at DESC").
+		Limit(25).
+		Find(&records).Error; err != nil {
+		log.Printf("⚠️ No se pudo consultar el historial de peleas: %v", err)
+		return fights
+	}
+
+	for _, record := range records {
+		fight := profileFight{
+			ID:       record.ID,
+			PlayedAt: record.CreatedAt,
+			TargetFT: record.TargetFT,
+		}
+		if record.Player1DiscordID == discordID {
+			fight.ScoreFor = record.Score1
+			fight.ScoreAgainst = record.Score2
+			fight.OpponentTag = record.Player2Tag
+			fight.OpponentAvatar = record.Player2Avatar
+			fight.PlayerTeam = makeProfileTeam(record.P1Char1, record.P1Char2, record.P1Fuse)
+			fight.OpponentTeam = makeProfileTeam(record.P2Char1, record.P2Char2, record.P2Fuse)
+		} else {
+			fight.ScoreFor = record.Score2
+			fight.ScoreAgainst = record.Score1
+			fight.OpponentTag = record.Player1Tag
+			fight.OpponentAvatar = record.Player1Avatar
+			fight.PlayerTeam = makeProfileTeam(record.P2Char1, record.P2Char2, record.P2Fuse)
+			fight.OpponentTeam = makeProfileTeam(record.P1Char1, record.P1Char2, record.P1Fuse)
+		}
+		if record.WinnerDiscordID == discordID {
+			fight.Result = "WIN"
+		} else {
+			fight.Result = "LOSS"
+		}
+		fights = append(fights, fight)
+	}
+	return fights
+}
+
+func placementLabel(placement, points int) string {
+	if placement > 0 {
+		return fmt.Sprintf("%d.º puesto", placement)
+	}
+	// Los resultados históricos guardan puntos, no el puesto exacto. Algunos
+	// valores representan puestos empatados, por eso se muestran como rango.
+	switch points {
+	case 100:
+		return "1.º puesto"
+	case 70:
+		return "2.º puesto"
+	case 50:
+		return "3.º puesto"
+	case 35:
+		return "4.º puesto"
+	case 20:
+		return "5.º–6.º puesto"
+	case 10:
+		return "7.º–8.º puesto"
+	default:
+		return "Puesto registrado"
+	}
+}
+
+func getProfileTournaments(discordID string) []profileTournament {
+	const league = "2xko_online"
+	byEvent := make(map[int]profileTournament)
+
+	// Compatibilidad con resultados antiguos: se migran visualmente desde el
+	// ranking de puntos, donde las posiciones 5-6 y 7-8 estaban agrupadas.
+	var players []models.Player
+	if err := db.Select("id").Where("discord_id = ? AND league = ?", discordID, league).Find(&players).Error; err != nil {
+		log.Printf("⚠️ No se pudo consultar el jugador del ranking de torneos: %v", err)
+	}
+	playerIDs := make([]int, 0, len(players))
+	for _, player := range players {
+		playerIDs = append(playerIDs, player.ID)
+	}
+	if len(playerIDs) > 0 {
+		var legacyRows []profileTournamentRow
+		err := db.Table("player_results AS pr").
+			Select("pr.event_id AS event_id, pe.name AS name, pe.slug AS slug, SUM(pr.points) AS points, 0 AS placement").
+			Joins("JOIN processed_events AS pe ON pe.event_id = pr.event_id").
+			Where("pr.player_id IN ? AND pr.league = ?", playerIDs, league).
+			Group("pr.event_id, pe.name, pe.slug").
+			Order("pr.event_id DESC").
+			Scan(&legacyRows).Error
+		if err != nil {
+			log.Printf("⚠️ No se pudieron consultar los resultados históricos de torneos: %v", err)
+		} else {
+			for _, row := range legacyRows {
+				byEvent[row.EventID] = profileTournament{
+					EventID:        row.EventID,
+					Name:           row.Name,
+					Slug:           row.Slug,
+					Points:         row.Points,
+					Placement:      0,
+					PlacementLabel: placementLabel(0, row.Points),
+					IsWinner:       row.Points == 100,
+				}
+			}
+		}
+	}
+
+	// Los datos nuevos guardan el puesto real, incluso para ubicaciones fuera
+	// del Top 8. Tienen prioridad sobre la etiqueta aproximada histórica.
+	var exactRows []profileTournamentRow
+	if err := db.Table("tournament_placements AS tp").
+		Select("tp.event_id AS event_id, pe.name AS name, pe.slug AS slug, tp.points AS points, tp.placement AS placement").
+		Joins("JOIN processed_events AS pe ON pe.event_id = tp.event_id").
+		Where("tp.discord_id = ? AND tp.league = ?", discordID, league).
+		Order("tp.event_id DESC").
+		Scan(&exactRows).Error; err != nil {
+		log.Printf("⚠️ No se pudieron consultar las posiciones de torneos: %v", err)
+	} else {
+		for _, row := range exactRows {
+			byEvent[row.EventID] = profileTournament{
+				EventID:        row.EventID,
+				Name:           row.Name,
+				Slug:           row.Slug,
+				Points:         row.Points,
+				Placement:      row.Placement,
+				PlacementLabel: placementLabel(row.Placement, row.Points),
+				IsWinner:       row.Placement == 1,
+			}
+		}
+	}
+
+	tournaments := make([]profileTournament, 0, len(byEvent))
+	for _, tournament := range byEvent {
+		tournaments = append(tournaments, tournament)
+	}
+	sort.Slice(tournaments, func(i, j int) bool {
+		return tournaments[i].EventID > tournaments[j].EventID
+	})
+	return tournaments
+}
+
+// writeProfile arma el perfil base. El historial detallado solo se adjunta a
+// /api/auth/me, no a la ruta pública de perfil.
+func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
@@ -333,11 +527,11 @@ func writeProfile(w http.ResponseWriter, discordID string) {
 		return
 	}
 
-	// Estadísticas de matchmaking (puede que el usuario nunca haya jugado un /ft)
+	// Estadísticas de sets registrados (puede que el usuario aún no tenga partidas).
 	var mp models.MatchmakingPlayer
 	db.Where("discord_id = ?", discordID).First(&mp)
 
-	// Posición en el ranking de matchmaking (cuántos tienen más puntos + 1)
+	// Posición en la tabla (cuántos jugadores tienen más puntos + 1).
 	position := 0
 	if mp.Points > 0 {
 		var ahead int64
@@ -345,7 +539,7 @@ func writeProfile(w http.ResponseWriter, discordID string) {
 		position = int(ahead) + 1
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{
+	response := map[string]any{
 		"user": user,
 		"stats": map[string]any{
 			"points":          mp.Points,
@@ -354,7 +548,12 @@ func writeProfile(w http.ResponseWriter, discordID string) {
 			"rankingPosition": position,
 		},
 		"rank": ranks.FromPoints(mp.Points),
-	})
+	}
+	if includeHistory {
+		response["fights"] = getProfileFights(discordID)
+		response["tournaments"] = getProfileTournaments(discordID)
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // HandleMe: GET /api/auth/me con header "Authorization: Bearer <token>".
@@ -369,7 +568,7 @@ func handleMe(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "no_autenticado"})
 		return
 	}
-	writeProfile(w, discordID)
+	writeProfile(w, discordID, true)
 }
 
 // HandlePublicProfile: GET /api/users/profile/{discordId} (para ver perfiles ajenos).
@@ -382,7 +581,7 @@ func handlePublicProfile(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	writeProfile(w, discordID)
+	writeProfile(w, discordID, false)
 }
 
 // RegisterRoutes registra todas las rutas de auth y perfiles.

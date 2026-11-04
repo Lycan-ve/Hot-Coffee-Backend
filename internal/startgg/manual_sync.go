@@ -89,6 +89,10 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 					continue
 				}
 
+				if err := recordTournamentPlacement(tx, playerID, discordID, item.GamerTag, t.EventID, item.Placement, earnedPoints); err != nil {
+					return err
+				}
+
 				switch {
 				case errors.Is(err, gorm.ErrRecordNotFound):
 					player = models.Player{

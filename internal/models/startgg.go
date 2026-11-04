@@ -27,3 +27,16 @@ type PlayerResult struct {
 	EventID  int    `gorm:"uniqueIndex:idx_player_event"`
 	Points   int
 }
+
+// TournamentPlacement conserva el puesto completo de cada miembro en cada
+// evento, incluso cuando no obtuvo puntos para el ranking general.
+type TournamentPlacement struct {
+	ID        uint   `gorm:"primaryKey"`
+	DiscordID string `gorm:"uniqueIndex:idx_tournament_placement_player_event;index"`
+	League    string `gorm:"uniqueIndex:idx_tournament_placement_player_event"`
+	EventID   int    `gorm:"uniqueIndex:idx_tournament_placement_player_event"`
+	PlayerID  int
+	GamerTag  string
+	Placement int
+	Points    int
+}

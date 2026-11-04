@@ -36,6 +36,7 @@ func Connect() *gorm.DB {
 		&models.Player{},
 		&startgg.ProcessedEvent{},
 		&models.PlayerResult{},
+		&models.TournamentPlacement{},
 		&models.Matchmaking{},
 		&models.MatchmakingPlayer{},
 		&models.User{},                // login con Discord

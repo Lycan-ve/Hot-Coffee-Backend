@@ -280,6 +280,36 @@ func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
 	}).Error
 }
 
+// recordTournamentPlacement guarda el puesto del miembro sin afectar el
+// puntaje del ranking. Si una cuenta aparece dos veces en un evento, conserva
+// su mejor puesto y el mayor puntaje de esas entradas.
+func recordTournamentPlacement(tx *gorm.DB, playerID int, discordID, gamerTag string, eventID, placement, points int) error {
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "discord_id"},
+			{Name: "league"},
+			{Name: "event_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"player_id": playerID,
+			"gamer_tag": gamerTag,
+			"placement": gorm.Expr(
+				"CASE WHEN tournament_placements.placement = 0 THEN ? ELSE LEAST(tournament_placements.placement, ?) END",
+				placement, placement,
+			),
+			"points": gorm.Expr("GREATEST(tournament_placements.points, ?)", points),
+		}),
+	}).Create(&models.TournamentPlacement{
+		DiscordID: discordID,
+		League:    leagueType,
+		EventID:   eventID,
+		PlayerID:  playerID,
+		GamerTag:  gamerTag,
+		Placement: placement,
+		Points:    points,
+	}).Error
+}
+
 // resolveDiscordID devuelve el ID de Discord SOLO si ese ID pertenece al servidor.
 // Todo se compara por ID numérico (snowflake), nunca por nombre de usuario.
 // Orden de prioridad:
@@ -426,9 +456,6 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 
 	for _, node := range nodes {
 		earnedPoints := calculatePoints(node.Placement)
-		if earnedPoints == 0 {
-			continue
-		}
 
 		rawName := node.Entrant.Name
 		sponsor := ""
@@ -484,7 +511,17 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 			// Validación estricta por ID de Discord (sin scraping ni comparar nombres)
 			discordUserID, reason := resolveDiscordID(originalID, playerID, user.Authorizations, activeDiscordMembers, player.DiscordID)
 			if discordUserID == "" {
-				log.Printf("   ⏭️ Omitiendo %s (top %d, start.gg id %d): %s.\n", gamerTag, node.Placement, originalID, reason)
+				log.Printf("   ⏭️ Omitiendo %s (puesto %d, start.gg id %d): %s.\n", gamerTag, node.Placement, originalID, reason)
+				continue
+			}
+
+			if err := recordTournamentPlacement(tx, playerID, discordUserID, gamerTag, eventID, node.Placement, earnedPoints); err != nil {
+				return err
+			}
+
+			// Los puestos sin puntos quedan en el historial personal, pero no
+			// crean jugadores de cero puntos ni alteran la tabla general.
+			if earnedPoints == 0 {
 				continue
 			}
 

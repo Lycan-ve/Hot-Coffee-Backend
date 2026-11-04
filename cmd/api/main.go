@@ -143,6 +143,8 @@ func main() {
 
 	// Sirve los íconos de rangos (Rangos/*.png) para el rank display del frontend
 	http.Handle("/Rangos/", http.StripPrefix("/Rangos/", http.FileServer(http.Dir("Rangos"))))
+	// Sirve los íconos de fuses para el historial de equipos del perfil.
+	http.Handle("/Fusion/", http.StripPrefix("/Fusion/", http.FileServer(http.Dir("Fusion"))))
 
 	// Inicia el servidor HTTP web (Render inyecta PORT por env; en local usa 8080).
 	port := os.Getenv("PORT")
