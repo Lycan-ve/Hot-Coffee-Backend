@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"smash-backend/internal/auth"
@@ -47,8 +48,42 @@ const (
 	statusCancelled     = "CANCELLED"
 )
 
-// PendingGameWinner especial: 3 = propuesta de RESULTADO FINAL (no un game).
-const pendingFinal = 3
+// PendingGameWinner especiales: 3 = propuesta de RESULTADO FINAL;
+// 4 = propuesta de CORRECCIÓN del último game (requiere confirmación del rival).
+const (
+	pendingFinal   = 3
+	pendingCorrect = 4
+)
+
+// Rate-limit del chat: máx. 10 mensajes por ventana de 30 s por jugador.
+const (
+	chatRateLimit  = 10
+	chatRateWindow = 30 * time.Second
+)
+
+var (
+	chatLimiterMu sync.Mutex
+	chatLimiter   = make(map[string][]time.Time)
+)
+
+func chatAllowed(discordID string) bool {
+	now := time.Now()
+	chatLimiterMu.Lock()
+	defer chatLimiterMu.Unlock()
+	recent := chatLimiter[discordID]
+	kept := recent[:0]
+	for _, t := range recent {
+		if now.Sub(t) < chatRateWindow {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= chatRateLimit {
+		chatLimiter[discordID] = kept
+		return false
+	}
+	chatLimiter[discordID] = append(kept, now)
+	return true
+}
 
 var db *gorm.DB
 
@@ -295,6 +330,10 @@ func pendingPayload(m *models.Matchmaking, discordID string) map[string]any {
 		p["kind"] = "final"
 		p["finalMine"] = mine
 		p["finalOpp"] = opp
+		return p
+	}
+	if m.PendingGameWinner == pendingCorrect {
+		p["kind"] = "correct"
 		return p
 	}
 	p["kind"] = "game"
@@ -574,6 +613,10 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "mensaje", "máximo 500 caracteres")
 		return
 	}
+	if !chatAllowed(discordID) {
+		writeErr(w, http.StatusTooManyRequests, "spam", "vas muy rápido: espera unos segundos antes de escribir de nuevo")
+		return
+	}
 
 	m, err := currentMatch(discordID)
 	if err != nil {
@@ -729,6 +772,28 @@ func handleReportConfirm(w http.ResponseWriter, r *http.Request) {
 			}
 		case pendingFinal:
 			return applyFinal(tx, &mm)
+		case pendingCorrect:
+			// Corrección confirmada por el rival: se deshace el último game.
+			hist := roundHistory(&mm)
+			if len(hist) == 0 {
+				return userErr{"no hay games para corregir"}
+			}
+			last := hist[len(hist)-1]
+			hist = hist[:len(hist)-1]
+			b, _ := json.Marshal(hist)
+			mm.RoundHistory = string(b)
+			if last == 1 && mm.Score1 > 0 {
+				mm.Score1--
+			}
+			if last == 2 && mm.Score2 > 0 {
+				mm.Score2--
+			}
+			mm.PendingGameWinner = 0
+			mm.PendingReportedBy = ""
+			mm.Status = statusInProgress
+			now := time.Now()
+			mm.LastRoundAt = &now
+			return tx.Save(&mm).Error
 		default:
 			return userErr{"reporte inválido"}
 		}
@@ -825,22 +890,14 @@ func handleReportCorrect(w http.ResponseWriter, r *http.Request) {
 		if !isCombatant(&mm, discordID) {
 			return userErr{"no eres parte de este set"}
 		}
-		hist := roundHistory(&mm)
-		if len(hist) == 0 {
+		if len(roundHistory(&mm)) == 0 {
 			return userErr{"todavía no hay games para corregir"}
 		}
-		last := hist[len(hist)-1]
-		hist = hist[:len(hist)-1]
-		b, _ := json.Marshal(hist)
-		mm.RoundHistory = string(b)
-		if last == 1 && mm.Score1 > 0 {
-			mm.Score1--
-		}
-		if last == 2 && mm.Score2 > 0 {
-			mm.Score2--
-		}
-		now := time.Now()
-		mm.LastRoundAt = &now
+		// La corrección ya no es unilateral: se propone y el RIVAL la confirma
+		// (igual que un reporte de game), para evitar disputas.
+		mm.PendingGameWinner = pendingCorrect
+		mm.PendingReportedBy = discordID
+		mm.Status = statusPendingVerify
 		return tx.Save(&mm).Error
 	})
 	if err != nil {
@@ -1212,5 +1269,17 @@ func sweep() {
 			[]string{statusInProgress, statusPendingVerify}, "web", now.Add(-staleAfter)).
 		Update("status", statusCancelled).Error; err != nil {
 		log.Printf("❌ WebMatch (cancelar abandonados): %v\n", err)
+	}
+
+	// 3) Chat de sets terminados hace más de 7 días: se borra para que la
+	//    tabla no crezca para siempre.
+	chatCutoff := now.Add(-7 * 24 * time.Hour)
+	var oldIDs []uint
+	if err := db.Model(&models.Matchmaking{}).
+		Where("status IN ? AND updated_at < ?", []string{statusFinished, statusCancelled}, chatCutoff).
+		Limit(500).Pluck("id", &oldIDs).Error; err != nil {
+		log.Printf("❌ WebMatch (limpieza de chat): %v\n", err)
+	} else if len(oldIDs) > 0 {
+		db.Where("match_id IN ?", oldIDs).Delete(&models.MatchmakingMessage{})
 	}
 }

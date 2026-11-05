@@ -23,6 +23,9 @@ import (
 // Variable global de la base de datos (instancia GORM)
 var db *gorm.DB
 
+// Cooldown del botón "Sincronizar": como máximo una solicitud manual cada 10 min.
+const syncCooldown = 10 * time.Minute
+
 // HandleGetRankings es el manejador HTTP para la API de Rankings (/api/rankings/2xko)
 // Permite filtrar por rango de torneos (parámetros 'from' y 'to') o devolver la tabla general.
 func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
@@ -59,7 +62,9 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	}
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println("❌ Rankings:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
 		return
 	}
 
@@ -78,7 +83,9 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 
 	players := []models.MatchmakingPlayer{}
 	if err := db.Order("points DESC, wins DESC, username ASC").Find(&players).Error; err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println("❌ Rankings (matchmaking):", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
 		return
 	}
 
@@ -141,20 +148,64 @@ func main() {
 	})
 
 	// GET /api/sync -> Marca la solicitud en la BD: el BOT ejecuta la sync en < 60 s.
-	// (La API ya no puede hacerla sola: la validación de miembros necesita al bot en línea)
+	// 🔐 Requiere sesión iniciada (JWT) y respeta un cooldown entre solicitudes.
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		// Preflight CORS: el header Authorization exige responder OPTIONS.
+		if auth.PreflightCors(w, r) {
+			return
+		}
+
+		// Solo usuarios autenticados pueden pedir la sincronización.
+		if _, ok := auth.UserIDFromRequest(r); !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "no_autenticado",
+				"message": "Inicia sesión con Discord para sincronizar",
+			})
+			return
+		}
+
+		// La fila de sync: se crea la primera vez que se usa.
+		var req models.SyncRequest
+		if err := db.First(&req, 1).Error; err != nil {
+			if err := db.Create(&models.SyncRequest{ID: 1}).Error; err != nil {
+				log.Println("❌ /api/sync: no se pudo crear la fila de sync:", err)
+			}
+		}
+
+		now := time.Now()
+		if req.Pending {
+			json.NewEncoder(w).Encode(map[string]string{
+				"status":  "already_pending",
+				"message": "Ya hay una sincronización en curso: el bot la ejecutará en menos de un minuto",
+			})
+			return
+		}
+		if req.CompletedAt != nil && now.Sub(*req.CompletedAt) < syncCooldown {
+			wait := int((syncCooldown - now.Sub(*req.CompletedAt)).Minutes()) + 1
+			json.NewEncoder(w).Encode(map[string]string{
+				"status":  "cooldown",
+				"message": fmt.Sprintf("Los torneos ya se sincronizaron hace poco; inténtalo de nuevo en ~%d min", wait),
+			})
+			return
+		}
 
 		if err := db.Model(&models.SyncRequest{}).Where("id = 1").Updates(map[string]any{
 			"pending":      true,
-			"requested_at": time.Now(),
+			"requested_at": now,
 			"completed_at": nil,
 		}).Error; err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Println("❌ /api/sync:", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
 			return
 		}
-		w.Write([]byte(`{"status": "success", "message": "Sincronización programada: el bot la ejecutará en menos de un minuto"}`))
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "success",
+			"message": "Sincronización programada: el bot la ejecutará en menos de un minuto",
+		})
 	})
 
 	// 🔐 Login con Discord + perfiles (módulo de login)
@@ -180,5 +231,12 @@ func main() {
 		port = "8080"
 	}
 	fmt.Printf("🚀 API web corriendo en http://localhost:%s\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	srv := &http.Server{
+		Addr:              ":" + port,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }

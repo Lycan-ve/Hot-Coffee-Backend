@@ -1,8 +1,10 @@
 package startgg
 
 import (
+	"encoding/json"
 	"errors"
 	"log"
+	"os"
 	"strings"
 
 	"smash-backend/internal/models"
@@ -23,33 +25,9 @@ type ManualTournament struct {
 }
 
 func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
-	manualTournaments := []ManualTournament{
-		{
-			EventID: 900001,
-			Slug:    "hot-coffee-manual-1",
-			Name:    "Hot Coffee #1 (Manual)",
-			Standings: []ManualStanding{
-				{GamerTag: "delete-user", Placement: 1},
-				{GamerTag: "WS", Placement: 2},
-				{GamerTag: "CRIS", Placement: 3},
-				{GamerTag: "MIYAMURA", Placement: 4},
-			},
-		},
-		{
-			EventID: 900002,
-			Slug:    "hot-coffee-manual-2",
-			Name:    "Hot Coffee #2 (Manual)",
-			Standings: []ManualStanding{
-				{GamerTag: "Shine Wizard", Placement: 1},
-				{GamerTag: "Daigo Masafumi", Placement: 2},
-				{GamerTag: "Vesani", Placement: 3},
-				{GamerTag: "Sandor", Placement: 4},
-				{GamerTag: "Pdpiu", Placement: 5},
-				{GamerTag: "delete-user", Placement: 5},
-				{GamerTag: "Cris", Placement: 7},
-				{GamerTag: "Gaskman", Placement: 7},
-			},
-		},
+	manualTournaments := loadManualTournaments()
+	if len(manualTournaments) == 0 {
+		return
 	}
 
 	for _, t := range manualTournaments {
@@ -139,13 +117,31 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 	}
 }
 
+// loadManualTournaments lee los torneos manuales desde torneos_manuales.json
+// (junto al binario). Sin archivo o con JSON inválido no se procesa nada y se
+// avisa por log: editar un torneo ya no exige recompilar el bot.
+func loadManualTournaments() []ManualTournament {
+	data, err := os.ReadFile("torneos_manuales.json")
+	if err != nil {
+		log.Printf("⚠️ No se pudo leer torneos_manuales.json: %v\n", err)
+		return nil
+	}
+	var ts []ManualTournament
+	if err := json.Unmarshal(data, &ts); err != nil {
+		log.Printf("❌ torneos_manuales.json inválido: %v\n", err)
+		return nil
+	}
+	return ts
+}
+
+// hashGamerTag genera el ID sintético de un tag nuevo con FNV-1a de 64 bits.
+// El hash anterior (31*h con int) podía colisionar y fusionar jugadores distintos.
+// Se acota a 31 bits positivos para mantener IDs compatibles con la tabla actual.
 func hashGamerTag(s string) int {
-	h := 0
+	h := uint64(2166136261)
 	for _, c := range strings.ToLower(s) {
-		h = 31*h + int(c)
+		h ^= uint64(c)
+		h *= 16777619
 	}
-	if h < 0 {
-		h = -h
-	}
-	return h
+	return int(h & 0x7FFFFFFF)
 }

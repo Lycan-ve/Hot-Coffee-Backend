@@ -19,6 +19,8 @@ RUN chmod +x start.sh
 # Archivos que el bot lee del disco en tiempo de ejecución
 COPY Personajes ./Personajes
 COPY Fusion ./Fusion
+# Torneos manuales editables sin recompilar
+COPY torneos_manuales.json ./torneos_manuales.json
 
 # Iconos de rangos que la API sirve en /Rangos/
 COPY Rangos ./Rangos

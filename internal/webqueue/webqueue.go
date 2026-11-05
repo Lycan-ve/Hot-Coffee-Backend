@@ -419,11 +419,9 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 	db.Model(&models.MatchmakingQueue{}).Where("discord_id = ?", discordID).
 		Update("last_seen", time.Now())
 
-	// Reacción rápida sin esperar al sweeper de fondo.
-	sweep()
-	if err := tryMatch(); err != nil {
-		log.Printf("❌ WebQueue: %v\n", err)
-	}
+	// El emparejamiento y las expiraciones las maneja el sweeper de fondo
+	// (cada 10 s): ejecutarlas en cada poll de cada cliente saturaba el pool
+	// de conexiones gratuito de Supabase.
 
 	resp := map[string]any{"status": "idle"}
 

@@ -1,0 +1,64 @@
+[
+  {
+    "EventID": 900001,
+    "Slug": "hot-coffee-manual-1",
+    "Name": "Hot Coffee #1 (Manual)",
+    "Standings": [
+      {
+        "GamerTag": "delete-user",
+        "Placement": 1
+      },
+      {
+        "GamerTag": "WS",
+        "Placement": 2
+      },
+      {
+        "GamerTag": "CRIS",
+        "Placement": 3
+      },
+      {
+        "GamerTag": "MIYAMURA",
+        "Placement": 4
+      }
+    ]
+  },
+  {
+    "EventID": 900002,
+    "Slug": "hot-coffee-manual-2",
+    "Name": "Hot Coffee #2 (Manual)",
+    "Standings": [
+      {
+        "GamerTag": "Shine Wizard",
+        "Placement": 1
+      },
+      {
+        "GamerTag": "Daigo Masafumi",
+        "Placement": 2
+      },
+      {
+        "GamerTag": "Vesani",
+        "Placement": 3
+      },
+      {
+        "GamerTag": "Sandor",
+        "Placement": 4
+      },
+      {
+        "GamerTag": "Pdpiu",
+        "Placement": 5
+      },
+      {
+        "GamerTag": "delete-user",
+        "Placement": 5
+      },
+      {
+        "GamerTag": "Cris",
+        "Placement": 7
+      },
+      {
+        "GamerTag": "Gaskman",
+        "Placement": 7
+      }
+    ]
+  }
+]

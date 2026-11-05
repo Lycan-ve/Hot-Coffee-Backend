@@ -24,7 +24,7 @@ import (
 
 const (
 	stateCookieName = "hc_oauth_state"
-	tokenTTL        = 7 * 24 * time.Hour
+	tokenTTL        = 24 * time.Hour
 )
 
 var db *gorm.DB
@@ -131,7 +131,13 @@ func fetchGuildMember(token, guildID string) (*discordMember, error) {
 
 func avatarURL(u discordUser) string {
 	if u.Avatar != "" {
-		return fmt.Sprintf("https://cdn.discordapp.com/avatars/%s/%s.png?size=128", u.ID, u.Avatar)
+		// Los avatares animados de Discord tienen hash con prefijo "a_" y se
+		// sirven como .gif (con .png devolverían 404 y el avatar saldría roto).
+		ext := ".png"
+		if strings.HasPrefix(u.Avatar, "a_") {
+			ext = ".gif"
+		}
+		return fmt.Sprintf("https://cdn.discordapp.com/avatars/%s/%s%s?size=128", u.ID, u.Avatar, ext)
 	}
 	// Avatar por defecto según el snowflake: (id >> 22) % 6
 	id, err := strconv.ParseUint(u.ID, 10, 64)
@@ -516,6 +522,16 @@ func getProfileTournaments(discordID string) []profileTournament {
 
 // writeProfile arma el perfil base. El historial detallado solo se adjunta a
 // /api/auth/me, no a la ruta pública de perfil.
+// publicUser expone solo los campos del perfil que usa el frontend. Nunca se
+// envían Roles, FirstLogin ni LastLogin (información interna del servidor).
+type publicUser struct {
+	DiscordID     string `json:"discordId"`
+	Username      string `json:"username"`
+	GlobalName    string `json:"globalName"`
+	GuildNickname string `json:"guildNickname"`
+	AvatarURL     string `json:"avatarUrl"`
+}
+
 func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -540,7 +556,13 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 	}
 
 	response := map[string]any{
-		"user": user,
+		"user": publicUser{
+			DiscordID:     user.DiscordID,
+			Username:      user.Username,
+			GlobalName:    user.GlobalName,
+			GuildNickname: user.GuildNickname,
+			AvatarURL:     user.AvatarURL,
+		},
 		"stats": map[string]any{
 			"points":          mp.Points,
 			"wins":            mp.Wins,

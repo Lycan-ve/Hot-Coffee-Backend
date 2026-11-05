@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"smash-backend/internal/database"
@@ -66,7 +68,14 @@ func startHealthServer() {
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
 	log.Printf("❤️ Health server activo en el puerto %s (monitorea esta URL con UptimeRobot)", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	srv := &http.Server{
+		Addr:              ":" + port,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 func main() {
@@ -219,8 +228,13 @@ func main() {
 		}()
 	}()
 
-	defer dg.Close()
-
-	// El proceso del bot vive para siempre (el health server corre en su goroutine)
-	select {}
+	// Cierre limpio: con SIGINT/SIGTERM se desconecta Discord y el health server
+	// se apaga sin dejar hilos ni paneles a medias.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	log.Println("🤖 Bot en línea. Ctrl+C para apagar.")
+	<-sigCh
+	log.Println("👋 Señal de apagado recibida: cerrando sesión de Discord…")
+	dg.Close()
+	log.Println("✅ Bot apagado correctamente.")
 }
