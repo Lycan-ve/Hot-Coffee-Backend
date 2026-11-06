@@ -5,29 +5,35 @@ import "fmt"
 // LP necesarios para subir una división completa (tier).
 const LPPerDivision = 100
 
+// Todos los jugadores parten de Gold I (1.000 pts): el rango se calcula
+// sobre el TOTAL (base + puntos ganados), aunque el ranking guarde los
+// puntos ganados desde 0.
+const BasePoints = 1000
+
 // Índices dentro de la escalera de los rangos sin tier.
 const (
-	GMIndex         = 24 // Grandmaster a los 2400 puntos
-	ChallengerIndex = 25 // Challenger a los 2500 puntos
+	GMIndex         = 24 // Grandmaster a los 2.500 puntos totales
+	ChallengerIndex = 25 // Challenger a los 2.600 puntos totales
 )
 
 // RankDef es una división de la escalera (rango + tier).
 // Grandmaster y Challenger no tienen tier (van por RP).
 type RankDef struct {
 	Rank string
-	Tier string // "III", "II", "I" o "" para GM/Challenger
+	Tier string // "I", "II", "III" o "" para GM/Challenger
 }
 
-// Ladder completa: el índice i se alcanza con i*100 puntos.
+// Ladder completa: el índice i se alcanza con (i+1)*100 puntos totales.
+// Iron I = 100 pts, Gold I = 1.000 pts, Grandmaster = 2.500, Challenger = 2.600.
 var Ladder = []RankDef{
-	{"Iron", "III"}, {"Iron", "II"}, {"Iron", "I"},
-	{"Bronze", "III"}, {"Bronze", "II"}, {"Bronze", "I"},
-	{"Silver", "III"}, {"Silver", "II"}, {"Silver", "I"},
-	{"Gold", "III"}, {"Gold", "II"}, {"Gold", "I"},
-	{"Platinum", "III"}, {"Platinum", "II"}, {"Platinum", "I"},
-	{"Emerald", "III"}, {"Emerald", "II"}, {"Emerald", "I"},
-	{"Diamond", "III"}, {"Diamond", "II"}, {"Diamond", "I"},
-	{"Master", "III"}, {"Master", "II"}, {"Master", "I"},
+	{"Iron", "I"}, {"Iron", "II"}, {"Iron", "III"},
+	{"Bronze", "I"}, {"Bronze", "II"}, {"Bronze", "III"},
+	{"Silver", "I"}, {"Silver", "II"}, {"Silver", "III"},
+	{"Gold", "I"}, {"Gold", "II"}, {"Gold", "III"},
+	{"Platinum", "I"}, {"Platinum", "II"}, {"Platinum", "III"},
+	{"Emerald", "I"}, {"Emerald", "II"}, {"Emerald", "III"},
+	{"Diamond", "I"}, {"Diamond", "II"}, {"Diamond", "III"},
+	{"Master", "I"}, {"Master", "II"}, {"Master", "III"},
 	{"Grandmaster", ""},
 	{"Challenger", ""},
 }
@@ -50,7 +56,7 @@ type Info struct {
 	IsRP          bool    `json:"isRp"`        // true para GM/Challenger
 	LP            int     `json:"lp"`          // 0-99 (rangos con tier)
 	RP            int     `json:"rp"`          // puntos totales (GM/Challenger)
-	Points        int     `json:"points"`      // puntos del ranking de matchmaking
+	Points        int     `json:"points"`      // total de rango (base + ganados)
 	LPToNext      int     `json:"lpToNext"`    // cuánto falta para subir
 	Next          string  `json:"next"`        // siguiente división, "" si ya es Challenger
 	NextIsRP      bool    `json:"nextIsRp"`
@@ -74,15 +80,20 @@ func iconPath(d RankDef) string {
 	return fmt.Sprintf("Rangos/%s_tier_%d_icon.png", d.Rank, tierToIdx[d.Tier])
 }
 
-// FromPoints calcula el rango actual a partir de los puntos del ranking
-// de matchmaking. Cada 100 puntos se sube una división; al llegar al
-// índice 24 (2400 pts) eres Grandmaster y al 25 (2500 pts) Challenger.
-// GM/Challenger muestran RP total en lugar de la barra de LP.
+// FromPoints calcula el rango actual a partir de los puntos GANADOS en el
+// ranking de matchmaking (guardados desde 0). Todos parten de Gold I:
+// el total de rango es BasePoints + puntos ganados, y cada 100 puntos
+// totales se sube una división. 1.100 = Gold II, 2.500 = Grandmaster y
+// 2.600 = Challenger. GM/Challenger muestran RP total (LP fuera de juego).
 func FromPoints(points int) Info {
 	if points < 0 {
 		points = 0
 	}
-	idx := points / LPPerDivision
+	total := BasePoints + points
+	idx := total/LPPerDivision - 1
+	if idx < 0 {
+		idx = 0
+	}
 	if idx >= len(Ladder) {
 		idx = len(Ladder) - 1
 	}
@@ -91,7 +102,7 @@ func FromPoints(points int) Info {
 		Rank:          d.Rank,
 		Tier:          d.Tier,
 		DisplayName:   d.displayName(),
-		Points:        points,
+		Points:        total,
 		DivisionIndex: idx,
 		IconPath:      iconPath(d),
 		Color:         Colors[d.Rank],
@@ -100,18 +111,18 @@ func FromPoints(points int) Info {
 
 	if info.IsRP {
 		// Grandmaster / Challenger: RP totales, sin barra de LP.
-		info.RP = points
+		info.RP = total
 		info.Progress = 100
 		if idx < len(Ladder)-1 {
 			next := Ladder[idx+1]
 			info.Next = next.displayName()
-			info.LPToNext = (idx+1)*LPPerDivision - points
+			info.LPToNext = (idx+2)*LPPerDivision - total
 		}
 		return info
 	}
 
 	// Rangos con tier (I-III): LP 0-99 dentro de la división.
-	info.LP = points % LPPerDivision
+	info.LP = total % LPPerDivision
 	info.LPToNext = LPPerDivision - info.LP
 	if idx+1 < len(Ladder) {
 		info.Next = Ladder[idx+1].displayName()

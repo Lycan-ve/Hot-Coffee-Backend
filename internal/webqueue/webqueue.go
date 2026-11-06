@@ -154,7 +154,7 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 		"discordId": discordID,
 		"tag":       tag,
 		"avatarUrl": avatar,
-		"points":    points,
+		"points":    points + ranks.BasePoints,
 		"rank":      ranks.FromPoints(points),
 	}
 }

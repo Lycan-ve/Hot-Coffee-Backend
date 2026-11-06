@@ -574,11 +574,18 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 
 	// Estadísticas de sets registrados (puede que el usuario aún no tenga partidas).
 	var mp models.MatchmakingPlayer
-	db.Where("discord_id = ?", discordID).First(&mp)
+	mpFound := db.Where("discord_id = ?", discordID).First(&mp).Error == nil
+
+	// El ranking de matchmaking parte de Gold I (1.000 pts): los puntos
+	// mostrados son el total (base + ganados); los ganados se guardan desde 0.
+	mmEarned := mp.Points
+	if mmEarned < 0 {
+		mmEarned = 0
+	}
 
 	// Posición en la tabla (cuántos jugadores tienen más puntos + 1).
 	position := 0
-	if mp.Points > 0 {
+	if mpFound {
 		var ahead int64
 		db.Model(&models.MatchmakingPlayer{}).Where("points > ?", mp.Points).Count(&ahead)
 		position = int(ahead) + 1
@@ -593,7 +600,7 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			AvatarURL:     user.AvatarURL,
 		},
 		"stats": map[string]any{
-			"points":          mp.Points,
+			"points":          ranks.BasePoints + mmEarned,
 			"wins":            mp.Wins,
 			"losses":          mp.Losses,
 			"rankingPosition": position,
