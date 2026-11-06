@@ -63,7 +63,7 @@ func resolveManualPlayerID(tx *gorm.DB, tag string) int {
 	err := tx.Where("league = ? AND gamer_tag ILIKE ? AND id <> ?",
 		leagueType, realTag, syntheticID).First(&real).Error
 	if err != nil {
-		log.Printf("   ⚠️  Alias '%s' -> '%s' no encontrado; se usa un jugador aparte\n", tag, realTag)
+		log.Printf("   ⚠️  Alias '%s' -> '%s' no encontrado; se usa un jugador aparte", tag, realTag)
 		return syntheticID
 	}
 	return real.ID
@@ -71,7 +71,11 @@ func resolveManualPlayerID(tx *gorm.DB, tag string) int {
 
 // CleanupDuplicatePlayers borra las filas duplicadas que crearon las syncs anteriores.
 // Solo borra por id exacto (los ids sintéticos de los alias y la cuenta duplicada de Start.gg),
-// así que no toca a los jugadores reales ni sus personajes.
+// así que no toca a los jugadores reales ni sus personajes. Al final limpia también
+// los resultados y puestos de jugadores que ya no existen en players (duplicados
+// unificados por alias, cuentas bloqueadas e ids sintéticos del hash anterior):
+// sin esa limpieza, el ranking por rango (SUM(player_results)) divergía del
+// ranking general (players.points).
 func CleanupDuplicatePlayers(db *gorm.DB) {
 	for tag := range manualTagAliases {
 		db.Where("league = ? AND id = ?", leagueType, hashGamerTag(tag)).Delete(&models.Player{})
@@ -81,6 +85,17 @@ func CleanupDuplicatePlayers(db *gorm.DB) {
 	}
 	for id := range blockedPlayerIDs {
 		db.Where("league = ? AND id = ?", leagueType, id).Delete(&models.Player{})
+	}
+
+	// player_results huérfanos: su player_id ya no existe en players.
+	if err := db.Where("league = ? AND player_id NOT IN (SELECT id FROM players WHERE league = ?)", leagueType, leagueType).
+		Delete(&models.PlayerResult{}).Error; err != nil {
+		log.Printf("⚠️ Cleanup: no se pudieron borrar player_results huérfanos: %v", err)
+	}
+	// tournament_placements huérfanos: mismo caso.
+	if err := db.Where("league = ? AND player_id NOT IN (SELECT id FROM players WHERE league = ?)", leagueType, leagueType).
+		Delete(&models.TournamentPlacement{}).Error; err != nil {
+		log.Printf("⚠️ Cleanup: no se pudieron borrar tournament_placements huérfanos: %v", err)
 	}
 }
 

@@ -15,7 +15,7 @@ import (
 	"smash-backend/internal/models"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause" // 🆕
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -129,7 +129,8 @@ query TournamentEvents($slug: String!) {
       videogame { id name }
     }
   }
-}`
+}
+`
 
 const standingsQuery = `
 query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
@@ -154,7 +155,8 @@ query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
       }
     }
   }
-}`
+}
+`
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
@@ -252,7 +254,12 @@ func ExtractTournamentsAndImages(messages []DiscordMessage) []TournamentInfo {
 		for _, match := range matches {
 			if len(match) > 1 {
 				slug := match[1]
-				tournamentMap[slug] = imgURL
+				// Los mensajes llegan del más nuevo al más viejo: conserva la
+				// primera imagen no vacía (la del mensaje más reciente) y no
+				// deja que un mensaje viejo sin adjunto la pise.
+				if existing, ok := tournamentMap[slug]; !ok || existing == "" {
+					tournamentMap[slug] = imgURL
+				}
 			}
 		}
 	}
@@ -354,37 +361,51 @@ func resolveDiscordID(originalID, playerID int, auths []startggAuth, members map
 
 // ---------- Sincronización ----------
 
-// 1. Firma actualizada de SyncTournamentsFromDiscordLive (ahora acepta activeMembers)
 func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken string, db *gorm.DB, activeMembers map[string]string) {
-	log.Printf("🔍 Procesando %d torneos únicos obtenidos desde Discord.\n", len(tournaments))
+	log.Printf("🔍 Procesando %d torneos únicos obtenidos desde Discord.", len(tournaments))
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	for _, t := range tournaments {
-		log.Printf("📥 Procesando torneo Start.gg [Slug: %s]\n", t.Slug)
+		log.Printf("📥 Procesando torneo Start.gg [Slug: %s]", t.Slug)
 
 		var tr tournamentEventsResp
 		if err := gqlDo(client, apiToken, eventsQuery, map[string]interface{}{"slug": t.Slug}, &tr); err != nil {
-			log.Printf("❌ [%s] no se pudo obtener la lista de eventos: %v\n", t.Slug, err)
+			log.Printf("❌ [%s] no se pudo obtener la lista de eventos: %v", t.Slug, err)
 			continue
 		}
 		if tr.Tournament == nil {
-			log.Printf("⚠️  [%s] el torneo no existe o no es accesible\n", t.Slug)
+			log.Printf("⚠️  [%s] el torneo no existe o no es accesible", t.Slug)
 			continue
 		}
-		log.Printf("   ↳ %d eventos encontrados en %s\n", len(tr.Tournament.Events), t.Slug)
+		log.Printf("   ↳ %d eventos encontrados en %s", len(tr.Tournament.Events), t.Slug)
+
+		// Guarda/actualiza la imagen del Top 8 publicada en el canal del
+		// calendario (tabla tournament_records, para la web).
+		if t.Top8ImgURL != "" {
+			if err := db.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "slug"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"name":       tr.Tournament.Name,
+					"top8_image": t.Top8ImgURL,
+				}),
+			}).Create(&models.TournamentRecord{
+				Slug:      t.Slug,
+				Name:      tr.Tournament.Name,
+				Top8Image: t.Top8ImgURL,
+			}).Error; err != nil {
+				log.Printf("⚠️  [%s] no se pudo guardar la imagen del Top 8: %v", t.Slug, err)
+			}
+		}
 
 		for _, ev := range tr.Tournament.Events {
-			// Convertir state de interface{} a int de forma segura
-			stateInt := 0
-			switch v := ev.State.(type) {
-			case float64:
-				stateInt = int(v)
-			case int:
-				stateInt = v
-			case string:
-				// Si por alguna razón viene como texto numérico
-				fmt.Sscanf(v, "%d", &stateInt)
+			// Filtro POSITIVO de videojuego: al ranking solo entran los eventos
+			// de 2XKO. Antes solo se excluía Street Fighter, así que cualquier
+			// otro juego de un torneo multi-juego sumaba puntos de 2XKO.
+			vgName := strings.ToLower(ev.Videogame.Name)
+			if !strings.Contains(vgName, "2xko") {
+				log.Printf("   ⏭️  Evento %d (%s) omitido por videojuego: %s", ev.ID, ev.Name, ev.Videogame.Name)
+				continue
 			}
 
 			isCompleted := false
@@ -406,26 +427,28 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 
 			// 🛑 REGLA ESTRICTA: El torneo/evento DEBE estar terminado
 			if !isCompleted {
-				log.Printf("   ⏭️  Evento %d (%s) omitido: El torneo aún no ha finalizado (Estado actual: %v)\n", ev.ID, ev.Name, ev.State)
-				continue
-			}
-
-			vgName := strings.ToLower(ev.Videogame.Name)
-			if strings.Contains(vgName, "street fighter") || strings.Contains(vgName, "sf6") {
-				log.Printf("   ⏭️  Evento %d (%s) omitido por videojuego: %s\n", ev.ID, ev.Name, ev.Videogame.Name)
+				log.Printf("   ⏭️  Evento %d (%s) omitido: El torneo aún no ha finalizado (Estado actual: %v)", ev.ID, ev.Name, ev.State)
 				continue
 			}
 
 			var already int64
 			db.Model(&ProcessedEvent{}).Where("event_id = ?", ev.ID).Count(&already)
 			if already > 0 {
-				log.Printf("   ⏭️  Evento %d (%s) ya procesado anteriormente\n", ev.ID, ev.Name)
+				log.Printf("   ⏭️  Evento %d (%s) ya procesado anteriormente", ev.ID, ev.Name)
 				continue
 			}
 
 			nodes, err := fetchAllStandings(client, apiToken, ev.ID)
 			if err != nil {
-				log.Printf("   ❌ Evento %d (%s): %v\n", ev.ID, ev.Name, err)
+				log.Printf("   ❌ Evento %d (%s): %v", ev.ID, ev.Name, err)
+				continue
+			}
+
+			// Standings vacíos = Start.gg todavía no publicó resultados (o hubo
+			// un fallo temporal): NO marcar el evento como procesado. Así la
+			// próxima sync lo reintenta en vez de perder sus puntos para siempre.
+			if len(nodes) == 0 {
+				log.Printf("   ⏳ Evento %d (%s): Start.gg no devolvió standings; se reintenta en la próxima sync.", ev.ID, ev.Name)
 				continue
 			}
 
@@ -437,16 +460,15 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name}).Error
 			})
 			if err != nil {
-				log.Printf("   ❌ Evento %d (%s): error al guardar: %v\n", ev.ID, ev.Name, err)
+				log.Printf("   ❌ Evento %d (%s): error al guardar: %v", ev.ID, ev.Name, err)
 				continue
 			}
-			log.Printf("   ✅ Evento %d (%s) [COMPLETADO]: %d participantes procesados y validados con Discord.\n", ev.ID, ev.Name, len(nodes))
+			log.Printf("   ✅ Evento %d (%s) [COMPLETADO]: %d participantes procesados y validados con Discord.", ev.ID, ev.Name, len(nodes))
 		}
 	}
-	log.Printf("✅ Sincronización en vivo con Discord finalizada.\n")
+	log.Printf("✅ Sincronización en vivo con Discord finalizada.")
 }
 
-// 2. Corregido el problema de "declared and not used: discordUserID" usando '_'
 func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscordMembers map[string]string) error {
 	// Sin lista de miembros es imposible validar: devolver error revierte la transacción
 	// y el evento NO queda marcado como procesado (se reintenta en la próxima sync).
@@ -511,7 +533,7 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 			// Validación estricta por ID de Discord (sin scraping ni comparar nombres)
 			discordUserID, reason := resolveDiscordID(originalID, playerID, user.Authorizations, activeDiscordMembers, player.DiscordID)
 			if discordUserID == "" {
-				log.Printf("   ⏭️ Omitiendo %s (puesto %d, start.gg id %d): %s.\n", gamerTag, node.Placement, originalID, reason)
+				log.Printf("   ⏭️ Omitiendo %s (puesto %d, start.gg id %d): %s.", gamerTag, node.Placement, originalID, reason)
 				continue
 			}
 
@@ -542,29 +564,41 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 				if err := tx.Create(&player).Error; err != nil {
 					return err
 				}
-				log.Printf("✨ Nuevo jugador registrado en el ranking: %s (%d pts) [Discord ID: %s]\n", gamerTag, earnedPoints, discordUserID)
+				log.Printf("✨ Nuevo jugador registrado en el ranking: %s (%d pts) [Discord ID: %s]", gamerTag, earnedPoints, discordUserID)
 
 			case err != nil:
 				return err
 
 			default:
-				// CASO B: El jugador ya existe, sumamos puntos y actualizamos su info y Discord ID
-				player.Points += earnedPoints
-				player.GamerTag = gamerTag
-				player.DiscordID = discordUserID
+				// CASO B: El jugador ya existe. Los puntos se suman con un UPDATE
+				// atómico (points + ?) en vez de leer-modificar-escribir: dos syncs
+				// simultáneas ya no pueden pisarse los puntos entre sí.
+				updates := map[string]any{
+					"points":     gorm.Expr("points + ?", earnedPoints),
+					"gamer_tag":   gamerTag,
+					"discord_id":  discordUserID,
+				}
 				if sponsor != "" {
-					player.Sponsor = sponsor
+					updates["sponsor"] = sponsor
 				}
 				if avatarURL != "" {
-					player.AvatarURL = avatarURL
+					updates["avatar_url"] = avatarURL
 				}
 				if profileURL != "" {
-					player.ProfileURL = profileURL
+					updates["profile_url"] = profileURL
 				}
-				if err := tx.Save(&player).Error; err != nil {
+				if err := tx.Model(&models.Player{}).
+					Where("id = ? AND league = ?", playerID, leagueType).
+					Updates(updates).Error; err != nil {
 					return err
 				}
-				log.Printf("📈 Puntos actualizados para %s: Ahora tiene %d pts (+%d) [Discord ID: %s]\n", gamerTag, player.Points, earnedPoints, discordUserID)
+				// Relé dentro de la misma transacción para el log con el total.
+				var fresh models.Player
+				if err := tx.First(&fresh, "id = ? AND league = ?", playerID, leagueType).Error; err == nil {
+					log.Printf("📈 Puntos actualizados para %s: Ahora tiene %d pts (+%d) [Discord ID: %s]", fresh.GamerTag, fresh.Points, earnedPoints, discordUserID)
+				} else {
+					log.Printf("📈 Puntos actualizados para %s (+%d) [Discord ID: %s]", gamerTag, earnedPoints, discordUserID)
+				}
 			}
 
 			if err := recordResult(tx, playerID, eventID, earnedPoints); err != nil {

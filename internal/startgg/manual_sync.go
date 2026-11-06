@@ -34,21 +34,18 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 		var already int64
 		db.Model(&ProcessedEvent{}).Where("event_id = ?", t.EventID).Count(&already)
 		if already > 0 {
-			log.Printf("   ⏭️  Torneo Manual ID %d (%s) ya procesado\n", t.EventID, t.Name)
+			log.Printf("   ⏭️  Torneo Manual ID %d (%s) ya procesado", t.EventID, t.Name)
 			continue
 		}
 
 		err := db.Transaction(func(tx *gorm.DB) error {
 			for _, item := range t.Standings {
-				earnedPoints := calculatePoints(item.Placement)
-				if earnedPoints == 0 {
+				if strings.EqualFold(item.GamerTag, "delete-user") || strings.EqualFold(item.GamerTag, "baneado") {
+					log.Printf("   ⏭️  Omitiendo jugador bloqueado: %s", item.GamerTag)
 					continue
 				}
 
-				if strings.EqualFold(item.GamerTag, "delete-user") || strings.EqualFold(item.GamerTag, "baneado") {
-					log.Printf("   ⏭️  Omitiendo jugador bloqueado: %s\n", item.GamerTag)
-					continue
-				}
+				earnedPoints := calculatePoints(item.Placement)
 
 				// 🆕 ¿este tag es en realidad una cuenta que ya existe?
 				playerID := resolveManualPlayerID(tx, item.GamerTag)
@@ -63,12 +60,19 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 				// Validación estricta: el jugador debe tener un Discord verificado dentro del servidor
 				discordID := resolveManualDiscordID(item.GamerTag, player.DiscordID, activeMembers)
 				if discordID == "" {
-					log.Printf("   ⏭️  Omitiendo '%s' (top %d, torneo manual): no se pudo verificar su Discord en el servidor.\n", item.GamerTag, item.Placement)
+					log.Printf("   ⏭️  Omitiendo '%s' (top %d, torneo manual): no se pudo verificar su Discord en el servidor.", item.GamerTag, item.Placement)
 					continue
 				}
 
+				// El puesto queda registrado en el historial aunque no sume
+				// puntos (igual que la sync en vivo de Start.gg, que anota
+				// TODOS los puestos verificados, no solo el top 8).
 				if err := recordTournamentPlacement(tx, playerID, discordID, item.GamerTag, t.EventID, item.Placement, earnedPoints); err != nil {
 					return err
+				}
+
+				if earnedPoints == 0 {
+					continue
 				}
 
 				switch {
@@ -87,12 +91,19 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 				case err != nil:
 					return err
 				default:
-					player.Points += earnedPoints
-					player.DiscordID = discordID
-					if !isAlias { // 🆕 no renombrar la cuenta real con el tag manual
-						player.GamerTag = item.GamerTag
+					// Suma atómica (points + ?): nunca pisa los puntos de otra
+					// sync en curso. Con alias no se renombra la cuenta real
+					// con el tag escrito a mano.
+					updates := map[string]any{
+						"points":     gorm.Expr("points + ?", earnedPoints),
+						"discord_id": discordID,
 					}
-					if err := tx.Save(&player).Error; err != nil {
+					if !isAlias {
+						updates["gamer_tag"] = item.GamerTag
+					}
+					if err := tx.Model(&models.Player{}).
+						Where("id = ? AND league = ?", playerID, leagueType).
+						Updates(updates).Error; err != nil {
 						return err
 					}
 				}
@@ -110,9 +121,9 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 		})
 
 		if err != nil {
-			log.Printf("❌ Error al guardar torneo manual %s: %v\n", t.Name, err)
+			log.Printf("❌ Error al guardar torneo manual %s: %v", t.Name, err)
 		} else {
-			log.Printf("✅ Torneo Manual %s indexado correctamente.\n", t.Name)
+			log.Printf("✅ Torneo Manual %s indexado correctamente.", t.Name)
 		}
 	}
 }
@@ -123,12 +134,12 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 func loadManualTournaments() []ManualTournament {
 	data, err := os.ReadFile("torneos_manuales.json")
 	if err != nil {
-		log.Printf("⚠️ No se pudo leer torneos_manuales.json: %v\n", err)
+		log.Printf("⚠️ No se pudo leer torneos_manuales.json: %v", err)
 		return nil
 	}
 	var ts []ManualTournament
 	if err := json.Unmarshal(data, &ts); err != nil {
-		log.Printf("❌ torneos_manuales.json inválido: %v\n", err)
+		log.Printf("❌ torneos_manuales.json inválido: %v", err)
 		return nil
 	}
 	return ts

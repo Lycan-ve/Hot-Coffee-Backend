@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,10 +22,24 @@ import (
 
 const syncInterval = 6 * time.Hour
 
+// syncMu evita que dos sincronizaciones se pisen entre sí: la sync corre al
+// arrancar, cada 6 h y desde el botón de la web (poll cada 60 s). Sin este
+// candado, dos pasadas simultáneas podían sobrescribir los puntos de un
+// mismo jugador (lost-update) aunque cada evento se procesara una sola vez.
+var syncMu sync.Mutex
+
 // runFullSync ejecuta el proceso completo de sincronización de torneos de Start.gg
-// (es la misma función que vivía en cmd/api/main.go: necesita la sesión del bot)
-func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session) {
-	log.Printf("🔄 Iniciando sincronización completa...\n")
+// (es la misma función que vivía en cmd/api/main.go: necesita la sesión del bot).
+// Devuelve false si ya había una sync en curso (el llamador decide si reintenta)
+// y true si esta pasada se ejecutó.
+func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session) bool {
+	if !syncMu.TryLock() {
+		log.Println("⏭️ Ya hay una sincronización en curso: esta pasada se omite.")
+		return false
+	}
+	defer syncMu.Unlock()
+
+	log.Printf("🔄 Iniciando sincronización completa...")
 
 	// 1. Limpia perfiles o etiquetas duplicadas en la base de datos
 	startgg.CleanupDuplicatePlayers(db)
@@ -32,25 +47,29 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	// Obtener los miembros activos del servidor de Discord para la validación estricta
 	if dgSession == nil {
 		log.Println("🛑 Sin sesión de Discord: se cancela la sync.")
-		return
+		return false
 	}
 	activeMembers := discord.GetGuildMembersMap(dgSession, os.Getenv("DISCORD_GUILD_ID"))
 	if len(activeMembers) == 0 {
 		log.Println("🛑 No se pudo cargar la lista de miembros de Discord: se cancela la sync para no marcar torneos como procesados sin jugadores.")
-		return
+		return false
 	}
 
-	// 2. Sincroniza leyendo los links de Start.gg publicados en el canal de torneos
-	//    de Discord (canal configurado en la variable DISCORD_CALENDAR_CHANNEL_ID)
+	// 2. Sincroniza leyendo los links de Start.gg publicados en el canal del
+	//    calendario de Discord (canal configurado en la variable DISCORD_CALENDAR_CHANNEL_ID)
 	calendarID := os.Getenv("DISCORD_CALENDAR_CHANNEL_ID")
 	if calendarID == "" {
 		log.Println("🛑 DISCORD_CALENDAR_CHANNEL_ID no está configurado en el .env: se cancela la sync de torneos.")
-		return
+		return false
 	}
 	messages := discord.FetchTournamentMessagesFromChannel(dgSession, calendarID)
 	tournaments := startgg.ExtractTournamentsAndImages(messages)
 	startgg.SyncTournamentsFromDiscordLive(tournaments, startGGToken, db, activeMembers)
-	log.Printf("✅ Sincronización de torneos finalizada.\n")
+
+	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
+	startgg.SyncManualTournaments(db, activeMembers)
+	log.Printf("✅ Sincronización de torneos finalizada.")
+	return true
 }
 
 // startHealthServer: endpoint mínimo para UptimeRobot.
@@ -67,10 +86,10 @@ func startHealthServer() {
 	log.Printf("❤️ Health server activo en el puerto %s (monitorea esta URL con UptimeRobot)", port)
 	srv := &http.Server{
 		Addr:              ":" + port,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout:  5 * time.Second,
+		ReadTimeout:        10 * time.Second,
+		WriteTimeout:       10 * time.Second,
+		IdleTimeout:        60 * time.Second,
 	}
 	log.Fatal(srv.ListenAndServe())
 }
@@ -211,16 +230,30 @@ func main() {
 				if !req.Pending {
 					continue
 				}
-				now := time.Now()
-				db.Model(&models.SyncRequest{}).Where("id = 1").Updates(map[string]any{
-					"pending":      false,
-					"completed_at": now,
-				})
-				if startGGToken == "" {
+
+				// Reclama la solicitud ANTES de ejecutar: si la sync tarda varios
+				// minutos, el siguiente tick no debe lanzarla otra vez.
+				claim := db.Model(&models.SyncRequest{}).Where("id = ? AND pending = ?", 1, true).
+					Updates(map[string]any{"pending": false, "requested_at": time.Now(), "completed_at": nil})
+				if claim.Error != nil || claim.RowsAffected == 0 {
 					continue
 				}
+
+				if startGGToken == "" {
+					db.Model(&models.SyncRequest{}).Where("id = 1").Update("completed_at", time.Now())
+					continue
+				}
+
 				log.Println("🔄 Sincronización manual solicitada desde la web...")
-				runFullSync(startGGToken, db, dg)
+				if !runFullSync(startGGToken, db, dg) {
+					// Ya había una sync en curso: devolver la solicitud a la cola
+					// para que corra apenas termine la actual.
+					db.Model(&models.SyncRequest{}).Where("id = 1").Update("pending", true)
+					continue
+				}
+				// Recién al TERMINAR la sync queda "completada": el cooldown de
+				// la web cuenta desde el final, no desde que se recogió la solicitud.
+				db.Model(&models.SyncRequest{}).Where("id = 1").Update("completed_at", time.Now())
 			}
 		}()
 	}()
