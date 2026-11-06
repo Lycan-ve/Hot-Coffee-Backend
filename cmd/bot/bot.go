@@ -41,7 +41,7 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	}
 
 	// 2. Sincroniza leyendo los links de Start.gg publicados en el canal de torneos
-	//    de Discord (canal configurado en la variable DISCORD_TOURNAMENT_CHANNEL_ID)
+	//    de Discord (canal configurado en la variable DISCORD_CALENDAR_CHANNEL_ID)
 	calendarID := os.Getenv("DISCORD_CALENDAR_CHANNEL_ID")
 	if calendarID == "" {
 		log.Println("🛑 DISCORD_CALENDAR_CHANNEL_ID no está configurado en el .env: se cancela la sync de torneos.")
@@ -50,9 +50,6 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	messages := discord.FetchTournamentMessagesFromChannel(dgSession, calendarID)
 	tournaments := startgg.ExtractTournamentsAndImages(messages)
 	startgg.SyncTournamentsFromDiscordLive(tournaments, startGGToken, db, activeMembers)
-
-	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
-	startgg.SyncManualTournaments(db, activeMembers)
 	log.Printf("✅ Sincronización de torneos finalizada.\n")
 }
 
