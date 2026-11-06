@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"smash-backend/internal/auth"
@@ -28,12 +29,25 @@ const syncCooldown = 10 * time.Minute
 
 // HandleGetRankings es el manejador HTTP para la API de Rankings (/api/rankings/2xko)
 // Permite filtrar por rango de torneos (parámetros 'from' y 'to') o devolver la tabla general.
+// Con ?series=<serie> (p. ej. "tns" o "hot-coffee") suma SOLO los torneos de esa serie.
 func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*") // Habilita CORS para el Frontend
 
 	from, errFrom := strconv.Atoi(r.URL.Query().Get("from"))
 	to, errTo := strconv.Atoi(r.URL.Query().Get("to"))
+	series := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("series")))
+
+	// Serie pedida: se ignoran from/to y se suman solo sus torneos.
+	var eventIDs []int
+	if series != "" {
+		eventIDs = seriesEvents(series)
+		if len(eventIDs) == 0 {
+			// Serie sin torneos procesados: tabla vacía (con [] y no con null).
+			json.NewEncoder(w).Encode([]models.Player{})
+			return
+		}
+	}
 
 	var resultsCount int64
 	db.Model(&models.PlayerResult{}).Where("league = ?", league).Count(&resultsCount)
@@ -42,7 +56,19 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	players := []models.Player{}
 	var err error
 
-	if useRange {
+	switch {
+	case len(eventIDs) > 0:
+		err = db.Raw(`
+			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url, p.profile_url, p.discord_id,
+			       SUM(pr.points)::bigint AS points
+			FROM players p
+			JOIN player_results pr
+			  ON pr.player_id = p.id AND pr.league = p.league
+			WHERE p.league = ? AND pr.event_id IN ?
+			GROUP BY p.id, p.league, p.profile_url
+			ORDER BY points DESC`,
+			league, eventIDs).Scan(&players).Error
+	case useRange:
 		err = db.Raw(`
 			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url, p.profile_url, p.discord_id,
 			       SUM(pr.points)::bigint AS points
@@ -57,7 +83,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 			GROUP BY p.id, p.league, p.profile_url
 			ORDER BY points DESC`,
 			league, from, to).Scan(&players).Error
-	} else {
+	default:
 		err = db.Where("league = ?", league).Order("points DESC").Find(&players).Error
 	}
 
@@ -146,6 +172,10 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(map[string]int64{"count": n})
 	})
+
+	// GET /api/tournaments/list -> Torneos procesados con numeración del ranking
+	// y su SERIE (Hot Coffee, TNS, Tacos Tuesday...): banner y filtro de la web.
+	http.HandleFunc("/api/tournaments/list", HandleGetTournaments)
 
 	// GET /api/sync -> Marca la solicitud en la BD: el BOT ejecuta la sync en < 60 s.
 	// 🔐 Requiere sesión iniciada (JWT) y respeta un cooldown entre solicitudes.
