@@ -44,7 +44,7 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 
 	if useRange {
 		err = db.Raw(`
-			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url, p.profile_url,
+			SELECT p.id, p.league, p.gamer_tag, p.sponsor, p.character, p.avatar_url, p.profile_url, p.discord_id,
 			       SUM(pr.points)::bigint AS points
 			FROM players p
 			JOIN player_results pr

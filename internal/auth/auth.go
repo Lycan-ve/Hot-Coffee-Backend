@@ -341,16 +341,17 @@ type profileTeam struct {
 }
 
 type profileFight struct {
-	ID             uint        `json:"id"`
-	PlayedAt       time.Time   `json:"playedAt"`
-	Result         string      `json:"result"`
-	ScoreFor       int         `json:"scoreFor"`
-	ScoreAgainst   int         `json:"scoreAgainst"`
-	TargetFT       int         `json:"targetFT"`
-	OpponentTag    string      `json:"opponentTag"`
-	OpponentAvatar string      `json:"opponentAvatar"`
-	PlayerTeam     profileTeam `json:"playerTeam"`
-	OpponentTeam   profileTeam `json:"opponentTeam"`
+	ID                uint        `json:"id"`
+	PlayedAt          time.Time   `json:"playedAt"`
+	Result            string      `json:"result"`
+	ScoreFor          int         `json:"scoreFor"`
+	ScoreAgainst      int         `json:"scoreAgainst"`
+	TargetFT          int         `json:"targetFT"`
+	OpponentTag       string      `json:"opponentTag"`
+	OpponentAvatar    string      `json:"opponentAvatar"`
+	OpponentDiscordID string      `json:"opponentDiscordId"`
+	PlayerTeam        profileTeam `json:"playerTeam"`
+	OpponentTeam      profileTeam `json:"opponentTeam"`
 }
 
 type profileTournamentRow struct {
@@ -402,6 +403,7 @@ func getProfileFights(discordID string) []profileFight {
 			fight.ScoreAgainst = record.Score2
 			fight.OpponentTag = record.Player2Tag
 			fight.OpponentAvatar = record.Player2Avatar
+			fight.OpponentDiscordID = record.Player2DiscordID
 			fight.PlayerTeam = makeProfileTeam(record.P1Char1, record.P1Char2, record.P1Fuse)
 			fight.OpponentTeam = makeProfileTeam(record.P2Char1, record.P2Char2, record.P2Fuse)
 		} else {
@@ -409,6 +411,7 @@ func getProfileFights(discordID string) []profileFight {
 			fight.ScoreAgainst = record.Score1
 			fight.OpponentTag = record.Player1Tag
 			fight.OpponentAvatar = record.Player1Avatar
+			fight.OpponentDiscordID = record.Player1DiscordID
 			fight.PlayerTeam = makeProfileTeam(record.P2Char1, record.P2Char2, record.P2Fuse)
 			fight.OpponentTeam = makeProfileTeam(record.P1Char1, record.P1Char2, record.P1Fuse)
 		}
@@ -520,8 +523,8 @@ func getProfileTournaments(discordID string) []profileTournament {
 	return tournaments
 }
 
-// writeProfile arma el perfil base. El historial detallado solo se adjunta a
-// /api/auth/me, no a la ruta pública de perfil.
+// writeProfile arma el perfil completo (identidad, stats, rango e historial).
+// Sirve tanto a /api/auth/me como a la ruta pública de perfiles.
 // publicUser expone solo los campos del perfil que usa el frontend. Nunca se
 // envían Roles, FirstLogin ni LastLogin (información interna del servidor).
 type publicUser struct {
@@ -538,9 +541,31 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 
 	var user models.User
 	if err := db.Where("discord_id = ?", discordID).First(&user).Error; err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "usuario_no_encontrado"})
-		return
+		// El jugador puede existir en los rankings aunque nunca haya iniciado
+		// sesión en la web: se reconstruye su identidad pública desde el
+		// ranking de matchmaking o el de torneos para que cualquiera pueda
+		// ver su perfil.
+		var mpFound models.MatchmakingPlayer
+		fromMatchmaking := db.Where("discord_id = ?", discordID).First(&mpFound).Error == nil
+		var tPlayer models.Player
+		fromTournaments := db.Where("discord_id = ?", discordID).Order("points DESC").First(&tPlayer).Error == nil
+		if !fromMatchmaking && !fromTournaments {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "usuario_no_encontrado"})
+			return
+		}
+		user = models.User{DiscordID: discordID}
+		if fromMatchmaking {
+			user.Username = mpFound.Username
+			user.AvatarURL = mpFound.AvatarURL
+		}
+		if fromTournaments {
+			user.GlobalName = tPlayer.GamerTag
+			if !fromMatchmaking {
+				user.Username = tPlayer.GamerTag
+				user.AvatarURL = tPlayer.AvatarURL
+			}
+		}
 	}
 
 	// Estadísticas de sets registrados (puede que el usuario aún no tenga partidas).
@@ -603,7 +628,9 @@ func handlePublicProfile(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	writeProfile(w, discordID, false)
+	// Perfil público completo: cualquiera (sin iniciar sesión) puede ver la
+	// ficha de cualquier jugador, incluido su historial.
+	writeProfile(w, discordID, true)
 }
 
 // RegisterRoutes registra todas las rutas de auth y perfiles.
