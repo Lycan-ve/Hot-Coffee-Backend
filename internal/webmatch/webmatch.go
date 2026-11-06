@@ -1,8 +1,9 @@
 // Package webmatch implementa la SALA DEL SET 100% web: armado de equipo
 // (2 personajes + fusión), código de sala, chat entre combatientes y reporte
 // de games con doble confirmación — sin depender del bot ni de Discord.
-// La liquidación de puntos es idéntica a la de /ft (ganador +FT×5, perdedor
-// −5 con piso de 5).
+// La liquidación de puntos es idéntica a la de /ft: FT 3 equitativo por
+// RANGO (las divisiones I/II/III valen igual; vencer a un rango superior
+// da más puntos, y caer ante uno inferior cuesta más).
 package webmatch
 
 import (
@@ -26,7 +27,8 @@ import (
 )
 
 const (
-	// Igual que /ft: puntos del ganador y castigo/piso del perdedor.
+	// Fallback para sets VIEJOS (terminados antes de las reglas por rango),
+	// que no guardaban el delta real de cada jugador.
 	loserPenalty   = 5
 	minPointsFloor = 5
 
@@ -376,9 +378,17 @@ func finishedPayload(m *models.Matchmaking, discordID string, myScore, oppScore 
 	}
 	won := m.WinnerDiscordID == discordID
 	points := playerPoints(discordID)
-	delta := m.PointsAtStake
+	// Delta real aplicado al terminar el set (reglas por rango); los sets
+	// viejos no lo guardan y usan el stake/penalty fijo de entonces.
+	delta := m.WinnerDelta
+	if delta == 0 {
+		delta = m.PointsAtStake
+	}
 	if !won {
-		delta = -loserPenalty
+		delta = m.LoserDelta
+		if delta == 0 {
+			delta = -loserPenalty
+		}
 	}
 	return map[string]any{
 		"status":    statusFinished,
@@ -1159,7 +1169,9 @@ func applyFinal(tx *gorm.DB, m *models.Matchmaking) error {
 }
 
 // applyMatchResult suma los puntos al ganador y resta al perdedor SOLO en
-// matchmaking_players (réplica exacta del bot: +FT×5 / −5 con piso de 5).
+// matchmaking_players (réplica exacta del bot: FT 3 equitativo por RANGO —
+// las divisiones I/II/III valen igual, con bonus/castigo por diferencia de
+// rango, racha de victorias y piso de 5).
 func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 	// Garantiza que ambos existan (se crean la primera vez que juegan un set).
 	for _, id := range []string{m.Player1DiscordID, m.Player2DiscordID} {
@@ -1187,18 +1199,31 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 		return errors.New("no se encontraron los jugadores del set")
 	}
 
-	winner.Points += m.PointsAtStake
-	winner.Wins++
+	// Puntos por RANGO (FT 3, partidas equitativas): las divisiones I/II/III
+	// no importan. Vencer a un rango superior da más puntos; caer ante uno
+	// inferior cuesta más. Se recalculan AQUÍ con los rangos reales del final.
+	stake := ranks.WinPoints(winner.Points, loser.Points)
+	penalty := ranks.LosePoints(winner.Points, loser.Points)
 
-	loserNew := loser.Points - loserPenalty
-	if loserNew < minPointsFloor {
-		loserNew = minPointsFloor
+	loserNew := loser.Points - penalty
+	if loserNew < ranks.MinPointsFloor {
+		loserNew = ranks.MinPointsFloor
 	}
 	if loserNew > loser.Points { // perder nunca sube los puntos
 		loserNew = loser.Points
 	}
+
+	m.PointsAtStake = stake
+	m.WinnerDelta = stake
+	m.LoserDelta = loserNew - loser.Points
+
+	winner.Points += stake
+	winner.Wins++
+	winner.Streak++ // racha de victorias: 3+ empareja contra un rango superior
+
 	loser.Points = loserNew
 	loser.Losses++
+	loser.Streak = 0
 
 	// Mantiene actualizados nombre y avatar.
 	if tag, avatar := sideInfoOf(m, winner.DiscordID); tag != "" {
@@ -1220,7 +1245,9 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 	if err := tx.Save(loser).Error; err != nil {
 		return err
 	}
-	return nil
+	// El set ya estaba guardado como FINISHED: persistimos el stake real y
+	// los deltas aplicados para que la sala muestre los puntos exactos.
+	return tx.Save(m).Error
 }
 
 // ---------------------------------------------------------------------------

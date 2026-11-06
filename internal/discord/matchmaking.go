@@ -17,6 +17,7 @@ import (
 
 	"smash-backend/internal/gamechars"
 	"smash-backend/internal/models"
+	"smash-backend/internal/ranks"
 
 	"github.com/bwmarrin/discordgo"
 	"gorm.io/gorm"
@@ -36,10 +37,8 @@ const (
 
 const (
 	matchmakingLeague = "2xko_online"
-
-	// Puntos que pierde quien pierde una reta, y piso por debajo del cual no se le quitan más.
-	loserPenalty   = 5
-	minPointsFloor = 5
+	// Los puntos de victoria/derrota y su piso viven en internal/ranks:
+	// dependen del RANGO de cada jugador (mismo rango = valor base).
 )
 
 func getMatchmakingChannelID() string {
@@ -678,13 +677,17 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 	author := interactionUser(i)
 	data := i.ApplicationCommandData()
 
-	targetFT := 0
+	// Ahora TODOS los sets son FT 3 (partidas equitativas por rango). La
+	// opción "objetivo" se mantiene solo por compatibilidad con la versión
+	// vieja del comando, que aún podía pedir FT 5.
+	targetFT := 3
+	oldFT := 0
 	rivalID := ""
 	roomCode := ""
 	for _, opt := range data.Options {
 		switch opt.Name {
 		case "objetivo":
-			targetFT = int(opt.IntValue())
+			oldFT = int(opt.IntValue())
 		case "rival":
 			rivalID, _ = opt.Value.(string)
 		case "sala":
@@ -696,11 +699,9 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		reply("❌ Comando inválido.")
 		return
 	}
-	// Solo FT 3 y FT 5: los formatos 7 y 10 están desactivados (la línea de
-	// bolitas y los keycaps 1..10 solo cubren bien hasta FT5 = 9 games).
-	if targetFT != 3 && targetFT != 5 {
-		reply("❌ Formato inválido. Usa FT 3 o FT 5.")
-		return
+	ftNote := ""
+	if oldFT == 5 {
+		ftNote = "\n⚙️ El formato FT 5 fue retirado: **todos los sets son FT 3** y el emparejamiento es por rango."
 	}
 
 	rival := &discordgo.User{ID: rivalID}
@@ -734,8 +735,11 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		Player2Avatar:    rival.AvatarURL("128"),
 		TargetFT:         targetFT,
 		RoomCode:         roomCode,
-		PointsAtStake:    targetFT * 5,
-		Status:           statusPending,
+		// Puntos en juego ESTIMADOS con los rangos actuales (lo máximo que
+		// puede ganar el retador); se recalculan al terminar el set.
+		PointsAtStake: ranks.MaxStakeOf(
+			mmPlayerPoints(db, author.ID), mmPlayerPoints(db, rival.ID)),
+		Status: statusPending,
 	}
 	if err := db.Create(&match).Error; err != nil {
 		log.Printf("❌ No se pudo crear la reta: %v\n", err)
@@ -743,8 +747,8 @@ func handleFTCommand(s *discordgo.Session, i *discordgo.InteractionCreate, db *g
 		return
 	}
 
-	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos de Matchmaking en juego: **%d pts**\n%s\n¿Aceptas el desafío?",
-		targetFT, author.Username, match.PointsAtStake, roomCodeLine(&match))
+	content := fmt.Sprintf("🎮 **SOLICITUD DE RETA FT %d**\n⚔️ **%s** te ha retado a un duelo.\n💰 Puntos de Matchmaking en juego: **%d pts**\n%s%s\n¿Aceptas el desafío?",
+		targetFT, author.Username, match.PointsAtStake, roomCodeLine(&match), ftNote)
 
 	keyboard := discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
@@ -1614,6 +1618,15 @@ func matchmakingRank(tx *gorm.DB, points int) int {
 	return int(higher) + 1
 }
 
+// mmPlayerPoints: puntos GANADOS en matchmaking del jugador (0 si nunca jugó).
+func mmPlayerPoints(db *gorm.DB, discordID string) int {
+	var p models.MatchmakingPlayer
+	if err := db.Where("discord_id = ?", discordID).First(&p).Error; err == nil {
+		return p.Points
+	}
+	return 0
+}
+
 func sideInfo(m *models.Matchmaking, discordID string) (tag, avatar string) {
 	if discordID == m.Player1DiscordID {
 		return m.Player1Tag, m.Player1Avatar
@@ -1659,18 +1672,32 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 
 	oldWinnerPts, oldLoserPts := winner.Points, loser.Points
 
-	winner.Points += m.PointsAtStake
-	winner.Wins++
+	// Puntos por RANGO (FT 3, partidas equitativas): las divisiones I/II/III
+	// no importan, solo el rango. Vencer a un rango superior da más puntos;
+	// caer ante uno inferior cuesta más. Se recalculan AQUÍ, con los rangos
+	// reales al terminar el set (el stake de la reta era solo estimado).
+	stake := ranks.WinPoints(winner.Points, loser.Points)
+	penalty := ranks.LosePoints(winner.Points, loser.Points)
 
-	loserNew := loser.Points - loserPenalty
-	if loserNew < minPointsFloor {
-		loserNew = minPointsFloor
+	loserNew := loser.Points - penalty
+	if loserNew < ranks.MinPointsFloor {
+		loserNew = ranks.MinPointsFloor
 	}
 	if loserNew > loser.Points { // perder nunca sube los puntos
 		loserNew = loser.Points
 	}
+
+	m.PointsAtStake = stake
+	m.WinnerDelta = stake
+	m.LoserDelta = loserNew - loser.Points
+
+	winner.Points += stake
+	winner.Wins++
+	winner.Streak++ // racha de victorias: 3+ empareja contra un rango superior
+
 	loser.Points = loserNew
 	loser.Losses++
+	loser.Streak = 0
 
 	// Mantiene actualizados nombre y avatar de Discord.
 	if tag, avatar := sideInfo(m, winner.DiscordID); tag != "" {
@@ -1863,415 +1890,3 @@ func getFullSetKeyboard(m models.Matchmaking) []discordgo.MessageComponent {
 		}),
 		row(discordgo.SelectMenu{
 			MenuType:    discordgo.StringSelectMenu,
-			CustomID:    fmt.Sprintf("ft_fs2_%d", m.ID),
-			Placeholder: fmt.Sprintf("🏆 Games de %s", m.Player2Tag),
-			MinValues:   &one,
-			MaxValues:   one,
-			Options:     opts,
-		}),
-		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{
-				Label:    "◀️ Volver a reportar por games",
-				Style:    discordgo.SecondaryButton,
-				CustomID: fmt.Sprintf("ft_back_%d", m.ID),
-			},
-		}},
-	}
-}
-
-// getCloseKeyboard: panel de propuesta de cierre (rondas bloqueadas mientras esté activo).
-func getCloseKeyboard(matchID uint) discordgo.ActionsRow {
-	return discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.Button{
-				Label:    "✅ Aceptar cierre",
-				Style:    discordgo.SuccessButton,
-				CustomID: fmt.Sprintf("ft_acceptclose_%d", matchID),
-			},
-			discordgo.Button{
-				Label:    "▶️ Seguir jugando",
-				Style:    discordgo.SecondaryButton,
-				CustomID: fmt.Sprintf("ft_declineclose_%d", matchID),
-			},
-		},
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Contenido de los paneles
-// ---------------------------------------------------------------------------
-
-// teamPanelEmbed: ficha del jugador. La FUSIÓN manda: al confirmar, encabeza el
-// título y el embed pasa a dorado; mientras, slots con estado (✔ / por elegir).
-func teamPanelEmbed(m models.Matchmaking, side string) *discordgo.MessageEmbed {
-	tag, avatar, c1, c2, fuse := m.Player1Tag, m.Player1Avatar, m.P1Char1, m.P1Char2, m.P1Fuse
-	complete := m.P1TeamComplete()
-	if side == "p2" {
-		tag, avatar, c1, c2, fuse = m.Player2Tag, m.Player2Avatar, m.P2Char1, m.P2Char2, m.P2Fuse
-		complete = m.P2TeamComplete()
-	}
-
-	embed := &discordgo.MessageEmbed{}
-	if avatar != "" {
-		embed.Author = &discordgo.MessageEmbedAuthor{Name: tag, IconURL: avatar}
-	}
-
-	if complete {
-		embed.Color = 0xFEE75C // dorado: equipo listo
-		embed.Title = fmt.Sprintf("⚡ %s · FT %d", gamechars.FuseName(fuse), m.TargetFT)
-		embed.Description = fmt.Sprintf("🔒 **%s + %s**", gamechars.CharacterName(c1), gamechars.CharacterName(c2))
-		return embed
-	}
-
-	charSlot := func(label, id string) string {
-		if n := gamechars.CharacterName(id); n != "" {
-			return fmt.Sprintf("%s — **%s** ✔", label, n)
-		}
-		return fmt.Sprintf("%s — *por elegir*", label)
-	}
-	fuseSlot := "🔀 Fusión — *por elegir*"
-	if n := gamechars.FuseName(fuse); n != "" {
-		fuseSlot = fmt.Sprintf("🔀 Fusión — **%s** ✔", n)
-	}
-	embed.Color = 0x5865F2
-	embed.Title = fmt.Sprintf("🧩 ARMA TU EQUIPO · FT %d", m.TargetFT)
-	embed.Description = fmt.Sprintf("%s\n%s\n%s", charSlot("1️⃣ Personaje 1", c1), charSlot("2️⃣ Personaje 2", c2), fuseSlot)
-	embed.Footer = &discordgo.MessageEmbedFooter{
-		Text: "La fusión define tu estilo — se muestra en la portada del embed",
-	}
-	return embed
-}
-
-// historyBlock construye el resumen del set con el ORDEN de las victorias:
-//
-//	game 1: **A** W - L **B**
-//	**Score** `2 - 0`
-func historyBlock(m *models.Matchmaking) string {
-	var hist []int
-	if b := []byte(m.RoundHistory); len(b) > 0 {
-		if err := json.Unmarshal(b, &hist); err != nil {
-			hist = nil
-		}
-	}
-	if len(hist) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	for i, side := range hist {
-		res := "L - W"
-		if side == 1 {
-			res = "W - L"
-		}
-		fmt.Fprintf(&sb, "game %d: **%s** %s **%s**\n", i+1, m.Player1Tag, res, m.Player2Tag)
-	}
-	fmt.Fprintf(&sb, "**Score** `%d - %d`\n\n", m.Score1, m.Score2)
-	return sb.String()
-}
-
-// roomCodeLine devuelve la línea del código de la sala (vacía si la reta no tiene sala).
-// La sala es OPCIONAL en /ft: sin código no agrega nada.
-func roomCodeLine(m *models.Matchmaking) string {
-	if m.RoomCode == "" {
-		return ""
-	}
-	return fmt.Sprintf("🏠 **Sala:** `%s`\n", m.RoomCode)
-}
-
-func fullSetPanelContent(m models.Matchmaking) string {
-	p1, p2 := "—", "—"
-	if m.FinalPick1 >= 0 {
-		p1 = strconv.Itoa(m.FinalPick1)
-	}
-	if m.FinalPick2 >= 0 {
-		p2 = strconv.Itoa(m.FinalPick2)
-	}
-	return fmt.Sprintf("📋 **RESULTADO FINAL** — FT %d\n%s: **%s** · %s: **%s**\nElige los games de cada jugador (0 a %d); el set cierra con los dos.",
-		m.TargetFT, m.Player1Tag, p1, m.Player2Tag, p2, m.TargetFT)
-}
-
-// publishFinished muestra el resultado del set terminado y limpia el hilo.
-func publishFinished(s *discordgo.Session, i *discordgo.InteractionCreate, r matchReport) {
-	editMessage(s, i, fmt.Sprintf(
-		"🏁 **SET FINALIZADO** — %s `%d - %d` %s\n"+
-			"🏆 **%s** %s pts (total **%d**)\n"+
-			"📊 Reporte en <#%s> · este hilo se borra en 5 s.",
-		r.Match.Player1Tag, r.Match.Score1, r.Match.Score2, r.Match.Player2Tag,
-		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints,
-		getMatchmakingResultChannelID()), nil)
-	go func() {
-		sendMatchmakingReport(s, r)
-		closeMatchThread(s, r.Match)
-	}()
-}
-
-// appendRound agrega una victoria al historial (1 = Player1, 2 = Player2).
-func appendRound(m *models.Matchmaking, side string) {
-	var hist []int
-	_ = json.Unmarshal([]byte(m.RoundHistory), &hist) // vacío/inválido = historial nuevo
-	switch side {
-	case "p1":
-		hist = append(hist, 1)
-	case "p2":
-		hist = append(hist, 2)
-	}
-	b, _ := json.Marshal(hist)
-	m.RoundHistory = string(b)
-}
-
-// getLeaderTag devuelve el tag de quien va ganando el marcador.
-func getLeaderTag(m models.Matchmaking) string {
-	if m.Score1 > m.Score2 {
-		return m.Player1Tag
-	}
-	return m.Player2Tag
-}
-
-// ---------------------------------------------------------------------------
-// Reporte al canal de resultados
-// ---------------------------------------------------------------------------
-
-// sendMatchmakingReport publica el resultado en el canal de resultados.
-// Diseño "Matchup Card": tarjeta VS con los champions de ambos + marcador
-// pixel-art al centro (perdedor en blanco y negro); el "GG" en la miniatura;
-// puntos/ranking en la descripción.
-func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
-	m := r.Match
-
-	// Equipo del ganador (para el footer; la fusión queda como miniatura
-	// de fallback si falta el GG).
-	wc1, wc2, wfuse := m.P2Char1, m.P2Char2, m.P2Fuse
-	if m.WinnerDiscordID == m.Player1DiscordID {
-		wc1, wc2, wfuse = m.P1Char1, m.P1Char2, m.P1Fuse
-	}
-
-	desc := fmt.Sprintf("**%s %d — %d %s**\n", m.Player1Tag, m.Score1, m.Score2, m.Player2Tag)
-	// Secuencia de games desde la perspectiva del GANADOR (el autor del embed):
-	// solo si el set se reportó game a game (los "Resultado final" no tienen orden).
-	foot := "⚡ " + gamechars.TeamLabel(wc1, wc2, wfuse)
-	if hasRoundHistory(&m) {
-		ref := "p2"
-		if m.WinnerDiscordID == m.Player1DiscordID {
-			ref = "p1"
-		}
-		desc += roundTrack(m, ref) + "\n"
-		foot += " · 🟢 gana " + r.WinnerTag
-	}
-	// Salto de línea extra: separa el marcador/bolitas del bloque de puntos.
-	// Etiquetas del equipo de testers: 😎 WINS para el ganador, 😵 LOSES para
-	// el perdedor (antes 🏆/❌).
-	desc += "\n" + fmt.Sprintf("😎 **WINS** · **%s** %s pts → **%d** · %s\n😵 **LOSES** · %s %s pts → **%d** · %s",
-		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW),
-		r.LoserTag, signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL))
-
-	wTag, wAvatar := sideInfo(&m, m.WinnerDiscordID)
-	embed := &discordgo.MessageEmbed{
-		Color:       0xFEE75C, // dorado
-		Title:       fmt.Sprintf("🏆 VICTORIA · FT %d", m.TargetFT),
-		Description: desc,
-	}
-	if wAvatar != "" {
-		embed.Author = &discordgo.MessageEmbedAuthor{Name: wTag, IconURL: wAvatar}
-	}
-
-	files := []*discordgo.File{}
-	// Miniatura: el "GG" del cierre (pedido del equipo de testers, en vez de
-	// la fusión del ganador); si el archivo no está, se mantiene la fusión.
-	if f := assetPNG("GG.png", "gg.png"); f != nil {
-		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://gg.png"}
-		files = append(files, f)
-	} else if f := iconFilePNG("fusion.png", "fuse", wfuse, 80); f != nil {
-		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: "attachment://fusion.png"}
-		files = append(files, f)
-	}
-	// Tarjeta VS: champions de ambos + marcador pixel-art (negro/morado/verde).
-	// Los champions del PERDEDOR van en blanco y negro (pedido del equipo de
-	// testers): el ganador resalta a todo color.
-	graySide := "p1"
-	if m.WinnerDiscordID == m.Player1DiscordID {
-		graySide = "p2"
-	}
-	if card := matchCard(m, m.Score1, m.Score2, graySide, "match.png"); card != nil {
-		embed.Image = &discordgo.MessageEmbedImage{URL: "attachment://match.png"}
-		files = append(files, card)
-	}
-	embed.Footer = &discordgo.MessageEmbedFooter{
-		Text: foot,
-	}
-
-	if _, err := s.ChannelMessageSendComplex(getMatchmakingResultChannelID(), &discordgo.MessageSend{
-		Embeds: []*discordgo.MessageEmbed{embed},
-		Files:  files,
-	}); err != nil {
-		log.Printf("❌ No se pudo publicar el reporte de matchmaking: %v\n", err)
-	}
-}
-
-// rankLine: "#2 → #2" (con ▲/▼ y cuántas posiciones si cambió) — versión compacta.
-func rankLine(oldRank, newRank int) string {
-	switch {
-	case oldRank == newRank:
-		return fmt.Sprintf("#%d → #%d", oldRank, newRank)
-	case oldRank > newRank:
-		return fmt.Sprintf("#%d → #%d ▲%d", oldRank, newRank, oldRank-newRank)
-	default:
-		return fmt.Sprintf("#%d → #%d ▼%d", oldRank, newRank, newRank-oldRank)
-	}
-}
-
-func signed(n int) string {
-	if n == 0 {
-		return "±0"
-	}
-	return fmt.Sprintf("%+d", n)
-}
-
-// RESULTADO FINAL: reportar todo el set con 2 dropdowns (0..FT).
-
-func handleFullSetPanel(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
-	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
-		if !isCombatant(user.ID, m) {
-			return userError{"🚫 Solo los combatientes pueden reportar el set."}
-		}
-		if m.Status != statusInProgress {
-			return userError{"⚠️ Este set no está en curso."}
-		}
-		if !m.P1TeamComplete() || !m.P2TeamComplete() {
-			return userError{"⚠️ Ambos equipos deben estar completos antes de reportar."}
-		}
-		m.FinalPick1, m.FinalPick2 = -1, -1
-		return nil
-	})
-	if err != nil {
-		respondError(s, i, err)
-		return
-	}
-	editMessage(s, i, fullSetPanelContent(match), getFullSetKeyboard(match))
-}
-
-func handleFullSetSelect(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64, kind string, values []string) {
-	if kind != "fs1" && kind != "fs2" || len(values) != 1 {
-		replyEphemeral(s, i, "⚠️ Selección no válida.")
-		return
-	}
-	v, err := strconv.Atoi(values[0])
-	if err != nil || v < 0 {
-		replyEphemeral(s, i, "⚠️ Selección no válida.")
-		return
-	}
-
-	var report *matchReport
-
-	match, err2 := withMatch(db, matchID, func(tx *gorm.DB, m *models.Matchmaking) error {
-		if !isCombatant(user.ID, m) {
-			return userError{"🚫 Solo los combatientes pueden reportar el set."}
-		}
-		if m.Status != statusInProgress {
-			return userError{"⚠️ Este set no está en curso."}
-		}
-		if v > m.TargetFT {
-			return userError{fmt.Sprintf("⚠️ Valor fuera de rango (0 a %d).", m.TargetFT)}
-		}
-		if kind == "fs1" {
-			m.FinalPick1 = v
-		} else {
-			m.FinalPick2 = v
-		}
-		// Falta un dropdown: se muestra el progreso y se espera el otro.
-		if m.FinalPick1 < 0 || m.FinalPick2 < 0 {
-			return nil
-		}
-		// Resultado válido: exactamente uno llega al FT.
-		if (m.FinalPick1 != m.TargetFT) == (m.FinalPick2 != m.TargetFT) {
-			return userError{fmt.Sprintf("⚠️ En FT %d, uno debe terminar con **%d** y el otro con menos.", m.TargetFT, m.TargetFT)}
-		}
-		m.Score1, m.Score2 = m.FinalPick1, m.FinalPick2
-		m.RoundHistory = "[]" // reporte directo: sin historial game a game
-		if m.Score1 > m.Score2 {
-			m.WinnerDiscordID, m.LoserDiscordID = m.Player1DiscordID, m.Player2DiscordID
-		} else {
-			m.WinnerDiscordID, m.LoserDiscordID = m.Player2DiscordID, m.Player1DiscordID
-		}
-		m.Status = statusFinished
-		now := time.Now()
-		m.LastRoundAt = &now
-		r, err := applyMatchResult(tx, m)
-		if err != nil {
-			return err
-		}
-		report = &r
-		return nil
-	})
-	if err2 != nil {
-		respondError(s, i, err2)
-		return
-	}
-	if report != nil {
-		publishFinished(s, i, *report)
-		return
-	}
-	editMessage(s, i, fullSetPanelContent(match), getFullSetKeyboard(match))
-}
-
-func handleFullSetBack(s *discordgo.Session, i *discordgo.InteractionCreate, db *gorm.DB, user *discordgo.User, matchID uint64) {
-	match, err := withMatch(db, matchID, func(_ *gorm.DB, m *models.Matchmaking) error {
-		if !isCombatant(user.ID, m) {
-			return userError{"🚫 Solo los combatientes pueden usar el panel."}
-		}
-		if m.Status != statusInProgress {
-			return userError{"⚠️ Este set no está en curso."}
-		}
-		m.FinalPick1, m.FinalPick2 = -1, -1
-		return nil
-	})
-	if err != nil {
-		respondError(s, i, err)
-		return
-	}
-	refreshGamePanel(s, i, "", match)
-}
-
-// ---------------------------------------------------------------------------
-// Cierre del hilo (borrado con fallback de archivado)
-// ---------------------------------------------------------------------------
-
-// closeMatchThread cierra el hilo de la reta terminada, tras la demora anunciada al usuario.
-// Estrategia en cascada:
-//  1. Borra el hilo (requiere permiso "Gestionar hilos" / MANAGE_THREADS).
-//  2. Si falla (p. ej. 50013 Missing Permissions), archiva el hilo como fallback:
-//     el creador del hilo (el bot) puede archivarlo aunque no tenga ese permiso.
-func closeMatchThread(s *discordgo.Session, m models.Matchmaking) {
-	if m.ThreadID == "" {
-		log.Printf("⚠️ Reta %d sin ThreadID guardado: no se puede cerrar el hilo automáticamente.\n", m.ID)
-		return
-	}
-
-	time.Sleep(5 * time.Second)
-
-	if _, err := s.ChannelDelete(m.ThreadID); err != nil {
-		log.Printf("⚠️ No se pudo borrar el hilo %s: %v — se intenta archivar como fallback.\n", m.ThreadID, err)
-		archiveFallback(s, m.ThreadID)
-		return
-	}
-	log.Printf("🗑️ Hilo %s (reta %d) eliminado automáticamente.\n", m.ThreadID, m.ID)
-}
-
-// archiveFallback archiva (y bloquea, si el permiso lo permite) un hilo que no se pudo borrar.
-func archiveFallback(s *discordgo.Session, threadID string) {
-	archived, locked := true, true
-
-	// Intento 1: archivar Y bloquear en la misma petición.
-	if _, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{
-		Archived: &archived,
-		Locked:   &locked,
-	}); err == nil {
-		log.Printf("🔒 Hilo %s archivado y bloqueado (fallback de borrado).\n", threadID)
-		return
-	}
-
-	// Intento 2: solo archivar — el creador del hilo puede archivar sin MANAGE_THREADS.
-	if _, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{Archived: &archived}); err != nil {
-		log.Printf("❌ No se pudo cerrar el hilo %s: %v (revisa el permiso 'Gestionar hilos' del bot).\n", threadID, err)
-		return
-	}
-	log.Printf("🗂️ Hilo %s archivado (el bloqueo requiere 'Gestionar hilos').\n", threadID)
-}

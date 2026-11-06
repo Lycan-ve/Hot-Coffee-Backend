@@ -19,11 +19,12 @@ import (
 const (
 	matchmakingLeague = "2xko_online"
 
-	// Radio de búsqueda en puntos: crece con el tiempo de espera.
-	radiusBase   = 25 // 0-30 s: ±25 pts (~1 división)
-	radiusGrowth = 25 // +25 pts cada 30 s de espera
-	radiusStep   = 30 * time.Second
-	radiusMax    = 1 << 20 // a los pocos minutos: contra cualquiera
+	// Emparejamiento EQUITATIVO por rango: Gold I, II y III son el mismo
+	// nivel. Con racha de 3+ victorias se busca un rival de UN rango más alto.
+	// Fallback para no dejar a nadie esperando para siempre: tras 2 min se
+	// aceptan rangos adyacentes y tras 4 min, cualquiera.
+	adjacentTierAfter = 2 * time.Minute
+	anyTierAfter      = 4 * time.Minute
 
 	// Heartbeat: si el navegador no reporta vida en 45 s, sale de la cola.
 	heartbeatTimeout = 45 * time.Second
@@ -77,21 +78,32 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": code, "message": msg})
 }
 
-// searchRadius: cuántos puntos de diferencia tolera el emparejamiento según
-// el tiempo que lleva esperando el jugador.
-func searchRadius(waited time.Duration) int {
-	r := radiusBase + int(waited/radiusStep)*radiusGrowth
-	if r > radiusMax {
-		r = radiusMax
+// canPairByRank decide si dos jugadores de la cola pueden enfrentarse
+// (partidas equitativas por RANGO; las divisiones I/II/III no importan):
+//  1. mismo rango de la escalera;
+//  2. racha de 3+ victorias: rival EXACTAMENTE un rango más alto;
+//  3. tras esperar mucho: rangos adyacentes (2 min) o cualquiera (4 min).
+func canPairByRank(a, b models.MatchmakingQueue, streaks map[string]int, waited time.Duration) bool {
+	ta, tb := ranks.TierIndex(a.Points), ranks.TierIndex(b.Points)
+	if ta == tb {
+		return true
 	}
-	return r
-}
-
-func abs(n int) int {
-	if n < 0 {
-		return -n
+	diff := ta - tb
+	if diff < 0 {
+		diff = -diff
 	}
-	return n
+	if diff > 1 {
+		return waited >= anyTierAfter
+	}
+	// Rangos adyacentes: vale si el jugador del rango MÁS BAJO tiene racha
+	// (se le sube el rival), o si el que más esperó ya esperó demasiado.
+	if streaks[a.DiscordID] >= ranks.StreakForUpperTier && ta == tb-1 {
+		return true
+	}
+	if streaks[b.DiscordID] >= ranks.StreakForUpperTier && tb == ta-1 {
+		return true
+	}
+	return waited >= adjacentTierAfter
 }
 
 // hasActiveMatch: ¿el usuario tiene una reta en curso (o pendiente)?
@@ -189,13 +201,28 @@ func requeue(tx *gorm.DB, discordID string, ft int, joinedAt time.Time) {
 
 // tryMatch empareja (en una transacción con lock de filas) a los jugadores de
 // la cola: recorre por antigüedad y junta a cada jugador con el primer rival
-// disponible del mismo formato dentro del radio de búsqueda.
+// disponible de SU RANGO (partidas equitativas; con racha, un rango arriba).
 func tryMatch() error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		var entries []models.MatchmakingQueue
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Order("joined_at ASC, discord_id ASC").Find(&entries).Error; err != nil {
 			return err
+		}
+
+		// Rachas de la tabla de matchmaking (habilitan rival de rango superior).
+		streaks := map[string]int{}
+		ids := make([]string, 0, len(entries))
+		for _, e := range entries {
+			ids = append(ids, e.DiscordID)
+		}
+		if len(ids) > 0 {
+			var players []models.MatchmakingPlayer
+			if err := tx.Where("discord_id IN ?", ids).Find(&players).Error; err == nil {
+				for _, p := range players {
+					streaks[p.DiscordID] = p.Streak
+				}
+			}
 		}
 
 		paired := make(map[string]bool, len(entries))
@@ -209,15 +236,12 @@ func tryMatch() error {
 				if paired[b.DiscordID] || a.DiscordID == b.DiscordID {
 					continue
 				}
-				if a.TargetFT != b.TargetFT {
-					continue // formatos distintos: no se cruzan
-				}
-				// El radio depende del que MÁS ha esperado (a es más antiguo: orden ASC).
-				if abs(a.Points-b.Points) > searchRadius(time.Since(a.JoinedAt)) {
+				if !canPairByRank(a, b, streaks, time.Since(a.JoinedAt)) {
 					continue
 				}
 
-				// P1 = quien lleva más tiempo esperando.
+				// P1 = quien lleva más tiempo esperando. Los puntos en juego se
+				// estiman con los rangos actuales (se recalculan al terminar).
 				proposal := models.MatchmakingProposal{
 					Player1DiscordID: a.DiscordID,
 					Player1Tag:       a.Username,
@@ -227,8 +251,8 @@ func tryMatch() error {
 					Player2Tag:       b.Username,
 					Player2Avatar:    b.AvatarURL,
 					Player2Points:    b.Points,
-					TargetFT:         a.TargetFT,
-					PointsAtStake:    a.TargetFT * 5, // igual que /ft
+					TargetFT:         3, // ahora todos los sets son FT 3
+					PointsAtStake:    ranks.MaxStakeOf(a.Points, b.Points),
 					Status:           proposalWaiting,
 					CreatedAt:        time.Now(),
 					ExpiresAt:        time.Now().Add(proposalTTL),
@@ -333,10 +357,7 @@ func handleJoin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "cuerpo", "JSON inválido")
 		return
 	}
-	if body.FT != 3 && body.FT != 5 {
-		writeErr(w, http.StatusBadRequest, "ft", "el formato debe ser FT 3 o FT 5")
-		return
-	}
+	_ = body.FT // compatibilidad: la app vieja manda 3 o 5, ahora SIEMPRE es FT 3
 
 	// Guardas: no se hace cola con un set activo o una propuesta abierta.
 	if active, err := hasActiveMatch(discordID); err != nil {
@@ -356,10 +377,10 @@ func handleJoin(w http.ResponseWriter, r *http.Request) {
 
 	tag, avatar := playerSnapshot(discordID)
 
-	// Upsert: si ya estaba en cola (p. ej. cambió de formato), conserva su puesto.
+	// Upsert: si ya estaba en cola (p. ej. reingresó), conserva su puesto.
 	var existing models.MatchmakingQueue
 	if err := db.Where("discord_id = ?", discordID).First(&existing).Error; err == nil {
-		existing.TargetFT = body.FT
+		existing.TargetFT = 3
 		existing.LastSeen = time.Now()
 		db.Save(&existing)
 	} else {
@@ -368,7 +389,7 @@ func handleJoin(w http.ResponseWriter, r *http.Request) {
 			Username:  tag,
 			AvatarURL: avatar,
 			Points:    playerPoints(discordID),
-			TargetFT:  body.FT,
+			TargetFT:  3,
 			JoinedAt:  time.Now(),
 			LastSeen:  time.Now(),
 		}
@@ -486,7 +507,9 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 			"ft":      entry.TargetFT,
 			"since":   entry.JoinedAt,
 			"players": qc,
-			"radius":  searchRadius(time.Since(entry.JoinedAt)),
+			// Informativo para el frontend viejo: ±100 pts ≈ un rango.
+			// El emparejamiento real es por RANGO (no por puntos).
+			"radius": 100,
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return

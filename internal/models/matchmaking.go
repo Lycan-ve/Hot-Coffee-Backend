@@ -21,6 +21,10 @@ type Matchmaking struct {
 	Score1           int    `json:"score_1"`
 	Score2           int    `json:"score_2"`
 	PointsAtStake    int    `json:"points_at_stake"`
+	// Puntos realmente aplicados al TERMINAR el set (reglas por rango):
+	// lo que ganó el ganador y lo que perdió el perdedor. 0 en sets viejos.
+	WinnerDelta int `json:"winner_delta"`
+	LoserDelta  int `json:"loser_delta"`
 	// PENDING, IN_PROGRESS, PENDING_VERIFY, PENDING_CLOSE, FINISHED, REJECTED, CANCELLED
 	Status          string `gorm:"index" json:"status"`
 	WinnerDiscordID string `json:"winner_discord_id"`
@@ -74,6 +78,7 @@ type MatchmakingPlayer struct {
 	Points    int       `gorm:"index" json:"points"`
 	Wins      int       `json:"wins"`
 	Losses    int       `json:"losses"`
+	Streak    int       `json:"streak"` // victorias seguidas: 3+ empareja contra un rango superior
 	UpdatedAt time.Time `json:"updatedAt"`
 	Ranking   int       `json:"ranking" gorm:"-"`
 }

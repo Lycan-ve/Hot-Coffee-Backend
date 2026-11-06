@@ -186,20 +186,11 @@ func main() {
 		}
 
 		// 3) Construcción y registro del comando de barra /ft
+		//    (todos los sets ahora son FT 3: partidas equitativas por rango).
 		cmd := &discordgo.ApplicationCommand{
 			Name:        "ft",
-			Description: "Inicia un matchmaking FT (3 o 5) contra un rival",
+			Description: "Reta a un rival a un set FT 3 (partidas equitativas por rango)",
 			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionInteger,
-					Name:        "objetivo",
-					Description: "Formato de la reta (3 o 5)",
-					Required:    true,
-					Choices: []*discordgo.ApplicationCommandOptionChoice{
-						{Name: "FT 3", Value: 3},
-						{Name: "FT 5", Value: 5},
-					},
-				},
 				{
 					Type:        discordgo.ApplicationCommandOptionUser,
 					Name:        "rival",
