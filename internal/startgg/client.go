@@ -54,6 +54,7 @@ type ProcessedEvent struct {
 	EventID int `gorm:"primaryKey;autoIncrement:false"`
 	Slug    string
 	Name    string
+	Image   string // 🆕 ícono del torneo en Start.gg (historial del perfil web)
 }
 
 // ---------- Start.gg (GraphQL) ----------
@@ -75,9 +76,15 @@ type eventSummary struct {
 	} `json:"videogame"`
 }
 
+type startggImage struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
 type tournamentEventsResp struct {
 	Tournament *struct {
 		Name   string         `json:"name"`
+		Images []startggImage `json:"images"`
 		Events []eventSummary `json:"events"`
 	} `json:"tournament"`
 }
@@ -122,6 +129,7 @@ const eventsQuery = `
 query TournamentEvents($slug: String!) {
   tournament(slug: $slug) {
     name
+    images { type url }
     events {
       id
       name
@@ -359,6 +367,25 @@ func resolveDiscordID(originalID, playerID int, auths []startggAuth, members map
 	return "", "no tiene Discord vinculado en Start.gg (o lo tiene oculto)"
 }
 
+// tournamentImage devuelve la imagen de perfil del torneo en Start.gg y, si
+// no existe, la primera imagen disponible (p. ej. el banner). Se guarda junto al
+// evento y se muestra como ícono en el historial de torneos del perfil web.
+func tournamentImage(images []startggImage) string {
+	first := ""
+	for _, img := range images {
+		if img.URL == "" {
+			continue
+		}
+		if img.Type == "profile" {
+			return img.URL
+		}
+		if first == "" {
+			first = img.URL
+		}
+	}
+	return first
+}
+
 // ---------- Sincronización ----------
 
 func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken string, db *gorm.DB, activeMembers map[string]string) {
@@ -379,6 +406,10 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 			continue
 		}
 		log.Printf("   ↳ %d eventos encontrados en %s", len(tr.Tournament.Events), t.Slug)
+
+		// 🆕 Ícono del torneo en Start.gg: se guarda junto a cada evento para
+		// el historial de torneos del perfil web.
+		tourneyImg := tournamentImage(tr.Tournament.Images)
 
 		// Guarda/actualiza la imagen del Top 8 publicada en el canal del
 		// calendario (tabla tournament_records, para la web).
@@ -434,6 +465,15 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 			var already int64
 			db.Model(&ProcessedEvent{}).Where("event_id = ?", ev.ID).Count(&already)
 			if already > 0 {
+				// 🆕 Backfill: los eventos procesados antes de esta mejora no
+				// guardaban el ícono del torneo; se completa sin reprocesar
+				// standings ni volver a sumar puntos.
+				if tourneyImg != "" {
+					var pe ProcessedEvent
+					if err := db.First(&pe, "event_id = ?", ev.ID).Error; err == nil && pe.Image == "" {
+						db.Model(&ProcessedEvent{}).Where("event_id = ?", ev.ID).Update("image", tourneyImg)
+					}
+				}
 				log.Printf("   ⏭️  Evento %d (%s) ya procesado anteriormente", ev.ID, ev.Name)
 				continue
 			}
@@ -457,7 +497,7 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 				if err := applyStandings(tx, ev.ID, nodes, activeMembers); err != nil {
 					return err
 				}
-				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name}).Error
+				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name, Image: tourneyImg}).Error
 			})
 			if err != nil {
 				log.Printf("   ❌ Evento %d (%s): error al guardar: %v", ev.ID, ev.Name, err)

@@ -360,12 +360,14 @@ type profileTournamentRow struct {
 	Slug      string `json:"slug"`
 	Points    int    `json:"points"`
 	Placement int    `json:"placement"`
+	Image     string `json:"image"`
 }
 
 type profileTournament struct {
 	EventID        int    `json:"eventId"`
 	Name           string `json:"name"`
 	Slug           string `json:"slug"`
+	Image          string `json:"image"`
 	Points         int    `json:"points"`
 	Placement      int    `json:"placement"`
 	PlacementLabel string `json:"placementLabel"`
@@ -466,10 +468,10 @@ func getProfileTournaments(discordID string) []profileTournament {
 	if len(playerIDs) > 0 {
 		var legacyRows []profileTournamentRow
 		err := db.Table("player_results AS pr").
-			Select("pr.event_id AS event_id, pe.name AS name, pe.slug AS slug, SUM(pr.points) AS points, 0 AS placement").
+			Select("pr.event_id AS event_id, pe.name AS name, pe.slug AS slug, SUM(pr.points) AS points, 0 AS placement, COALESCE(pe.image, '') AS image").
 			Joins("JOIN processed_events AS pe ON pe.event_id = pr.event_id").
 			Where("pr.player_id IN ? AND pr.league = ?", playerIDs, league).
-			Group("pr.event_id, pe.name, pe.slug").
+			Group("pr.event_id, pe.name, pe.slug, pe.image").
 			Order("pr.event_id DESC").
 			Scan(&legacyRows).Error
 		if err != nil {
@@ -480,6 +482,7 @@ func getProfileTournaments(discordID string) []profileTournament {
 					EventID:        row.EventID,
 					Name:           row.Name,
 					Slug:           row.Slug,
+					Image:          row.Image,
 					Points:         row.Points,
 					Placement:      0,
 					PlacementLabel: placementLabel(0, row.Points),
@@ -493,7 +496,7 @@ func getProfileTournaments(discordID string) []profileTournament {
 	// del Top 8. Tienen prioridad sobre la etiqueta aproximada histórica.
 	var exactRows []profileTournamentRow
 	if err := db.Table("tournament_placements AS tp").
-		Select("tp.event_id AS event_id, pe.name AS name, pe.slug AS slug, tp.points AS points, tp.placement AS placement").
+		Select("tp.event_id AS event_id, pe.name AS name, pe.slug AS slug, tp.points AS points, tp.placement AS placement, COALESCE(pe.image, '') AS image").
 		Joins("JOIN processed_events AS pe ON pe.event_id = tp.event_id").
 		Where("tp.discord_id = ? AND tp.league = ?", discordID, league).
 		Order("tp.event_id DESC").
@@ -505,6 +508,7 @@ func getProfileTournaments(discordID string) []profileTournament {
 				EventID:        row.EventID,
 				Name:           row.Name,
 				Slug:           row.Slug,
+				Image:          row.Image,
 				Points:         row.Points,
 				Placement:      row.Placement,
 				PlacementLabel: placementLabel(row.Placement, row.Points),
