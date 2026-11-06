@@ -45,7 +45,9 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 					continue
 				}
 
-				earnedPoints := calculatePoints(item.Placement)
+				top16 := isTop16Tournament(t.Name, t.Slug)
+
+				earnedPoints := calculatePoints(item.Placement, top16)
 
 				// 🆕 ¿este tag es en realidad una cuenta que ya existe?
 				playerID := resolveManualPlayerID(tx, item.GamerTag)

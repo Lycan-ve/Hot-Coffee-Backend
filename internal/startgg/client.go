@@ -411,6 +411,10 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 		// el historial de torneos del perfil web.
 		tourneyImg := tournamentImage(tr.Tournament.Images)
 
+		// 🆕 Excepción de puntaje: en las series TNS y Paragon también suman
+		// los puestos 9-16 (5 pts del 9º al 12º, 3 pts del 13º al 16º).
+		top16 := isTop16Tournament(tr.Tournament.Name, t.Slug)
+
 		// Guarda/actualiza la imagen del Top 8 publicada en el canal del
 		// calendario (tabla tournament_records, para la web).
 		if t.Top8ImgURL != "" {
@@ -494,7 +498,7 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 
 			err = db.Transaction(func(tx *gorm.DB) error {
 				// 🔍 Aquí se ejecuta applyStandings, que analiza a los usuarios y valida si están en activeMembers (Discord)
-				if err := applyStandings(tx, ev.ID, nodes, activeMembers); err != nil {
+				if err := applyStandings(tx, ev.ID, nodes, activeMembers, top16); err != nil {
 					return err
 				}
 				return tx.Create(&ProcessedEvent{EventID: ev.ID, Slug: t.Slug, Name: ev.Name, Image: tourneyImg}).Error
@@ -509,7 +513,7 @@ func SyncTournamentsFromDiscordLive(tournaments []TournamentInfo, apiToken strin
 	log.Printf("✅ Sincronización en vivo con Discord finalizada.")
 }
 
-func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscordMembers map[string]string) error {
+func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscordMembers map[string]string, top16 bool) error {
 	// Sin lista de miembros es imposible validar: devolver error revierte la transacción
 	// y el evento NO queda marcado como procesado (se reintenta en la próxima sync).
 	if len(activeDiscordMembers) == 0 {
@@ -517,7 +521,7 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 	}
 
 	for _, node := range nodes {
-		earnedPoints := calculatePoints(node.Placement)
+		earnedPoints := calculatePoints(node.Placement, top16)
 
 		rawName := node.Entrant.Name
 		sponsor := ""
@@ -649,7 +653,27 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 	return nil
 }
 
-func calculatePoints(placement int) int {
+// isTop16Tournament detecta las series con excepción de puntaje (TNS y
+// Paragon): en ellas también suman los puestos 9-16. Se compara por
+// nombre y por slug, sin distinguir mayúsculas.
+var top16Keywords = []string{"tns", "paragon"}
+
+func isTop16Tournament(names ...string) bool {
+	for _, n := range names {
+		lower := strings.ToLower(n)
+		for _, kw := range top16Keywords {
+			if strings.Contains(lower, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// calculatePoints es la tabla de puntaje del ranking. Corte general: top 8.
+// En torneos TNS/Paragon (top16=true) se extiende al top 16: 9º-12º suman
+// 5 pts y 13º-16º suman 3 pts.
+func calculatePoints(placement int, top16 bool) int {
 	switch {
 	case placement == 1:
 		return 100
@@ -663,6 +687,10 @@ func calculatePoints(placement int) int {
 		return 20
 	case placement >= 7 && placement <= 8:
 		return 10
+	case top16 && placement >= 9 && placement <= 12:
+		return 5
+	case top16 && placement >= 13 && placement <= 16:
+		return 3
 	default:
 		return 0
 	}
