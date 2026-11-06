@@ -2,7 +2,6 @@ package discord
 
 import (
 	"log"
-	"os"
 
 	"smash-backend/internal/startgg"
 
@@ -24,7 +23,7 @@ func GetGuildMembersMap(s *discordgo.Session, guildID string) DiscordUserMap {
 	for {
 		batch, err := s.GuildMembers(guildID, after, 1000)
 		if err != nil {
-			log.Printf("❌ Error al obtener miembros (GuildID: %s): %v\n", guildID, err)
+			log.Printf("❌ Error al obtener miembros (GuildID: %s): %v", guildID, err)
 			return make(DiscordUserMap) // lista incompleta = vacía, para no validar a medias
 		}
 		for _, m := range batch {
@@ -39,7 +38,7 @@ func GetGuildMembersMap(s *discordgo.Session, guildID string) DiscordUserMap {
 		after = batch[len(batch)-1].User.ID
 	}
 
-	log.Printf("👥 %d miembros cargados del servidor de Discord\n", len(membersMap))
+	log.Printf("👥 %d miembros cargados del servidor de Discord.", len(membersMap))
 	return membersMap
 }
 
@@ -83,7 +82,7 @@ func toInternalMessages(messages []*discordgo.Message) []startgg.DiscordMessage 
 	return internalMessages
 }
 
-// FetchTournamentMessagesFromChannel lee el historial del canal de torneos con la
+// FetchTournamentMessagesFromChannel lee el historial del canal del calendario con la
 // sesión ya conectada del bot (no abre una conexión nueva) y lo devuelve en el
 // formato interno de startgg. Recorre el canal hacia atrás en lotes de 100
 // mensajes hasta llegar al primero del canal (máximo 1000 por seguridad).
@@ -101,7 +100,7 @@ func FetchTournamentMessagesFromChannel(s *discordgo.Session, channelID string) 
 	for len(all) < maxMessages {
 		batch, err := s.ChannelMessages(channelID, batchSize, beforeID, "", "")
 		if err != nil {
-			log.Printf("❌ Error al leer los mensajes del canal de torneos (ID: %s): %v\n", channelID, err)
+			log.Printf("❌ Error al leer los mensajes del canal del calendario (ID: %s): %v", channelID, err)
 			break
 		}
 		all = append(all, batch...)
@@ -111,42 +110,6 @@ func FetchTournamentMessagesFromChannel(s *discordgo.Session, channelID string) 
 		beforeID = batch[len(batch)-1].ID
 	}
 
-	log.Printf("📥 Se leyeron %d mensajes del canal de torneos de Discord.\n", len(all))
+	log.Printf("📥 Se leyeron %d mensajes del canal del calendario de Discord.", len(all))
 	return toInternalMessages(all)
-}
-
-// FetchTournamentsFromDiscord mantiene su funcionamiento anterior (canal del
-// calendario con DISCORD_CALENDAR_CHANNEL_ID), pero reutiliza la conversión
-// compartida toInternalMessages.
-func FetchTournamentsFromDiscord() ([]startgg.TournamentInfo, *discordgo.Session) {
-	botToken := os.Getenv("DISCORD_BOT_TOKEN")
-	channelID := os.Getenv("DISCORD_CALENDAR_CHANNEL_ID")
-
-	if botToken == "" || channelID == "" {
-		log.Println("⚠️ DISCORD_BOT_TOKEN o DISCORD_CALENDAR_CHANNEL_ID no están configurados en el .env")
-		return nil, nil
-	}
-
-	session, err := discordgo.New("Bot " + botToken)
-	if err != nil {
-		log.Printf("❌ Error al crear la sesión de Discord: %v\n", err)
-		return nil, nil
-	}
-
-	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsGuilds | discordgo.IntentsGuildMembers
-
-	if err := session.Open(); err != nil {
-		log.Printf("❌ Error al abrir conexión con Discord: %v\n", err)
-		return nil, session
-	}
-
-	messages, err := session.ChannelMessages(channelID, 100, "", "", "")
-	if err != nil {
-		log.Printf("❌ Error al obtener los mensajes del canal de Discord: %v\n", err)
-		return nil, session
-	}
-
-	log.Printf("📥 Se obtuvieron %d mensajes del canal de Discord.\n", len(messages))
-
-	return startgg.ExtractTournamentsAndImages(toInternalMessages(messages)), session
 }

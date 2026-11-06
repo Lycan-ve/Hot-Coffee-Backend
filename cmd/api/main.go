@@ -176,7 +176,11 @@ func main() {
 		}
 
 		now := time.Now()
-		if req.Pending {
+		// Una solicitud "pending" que el bot no recogió (p. ej. estaba caído
+		// cuando se pulsó) se considera abandonada tras el cooldown: se permite
+		// pedir otra en vez de quedar atascada en "already_pending" para siempre.
+		stalePending := req.Pending && !req.RequestedAt.IsZero() && now.Sub(req.RequestedAt) > syncCooldown
+		if req.Pending && !stalePending {
 			json.NewEncoder(w).Encode(map[string]string{
 				"status":  "already_pending",
 				"message": "Ya hay una sincronización en curso: el bot la ejecutará en menos de un minuto",
@@ -233,10 +237,10 @@ func main() {
 	fmt.Printf("🚀 API web corriendo en http://localhost:%s\n", port)
 	srv := &http.Server{
 		Addr:              ":" + port,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout:  5 * time.Second,
+		ReadTimeout:        15 * time.Second,
+		WriteTimeout:       30 * time.Second,
+		IdleTimeout:        60 * time.Second,
 	}
 	log.Fatal(srv.ListenAndServe())
 }
