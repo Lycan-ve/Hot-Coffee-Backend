@@ -230,7 +230,9 @@ func playerPoints(discordID string) int {
 }
 
 func roundHistory(m *models.Matchmaking) []int {
-	var hist []int
+	// Siempre NO nulo: un slice nil se serializa como JSON "null" y rompe
+	// el frontend de la sala (match.roundHistory.length).
+	hist := []int{}
 	if b := []byte(m.RoundHistory); len(b) > 0 {
 		_ = json.Unmarshal(b, &hist)
 	}
