@@ -37,6 +37,7 @@ func Connect() *gorm.DB {
 		&startgg.ProcessedEvent{},
 		&models.PlayerResult{},
 		&models.TournamentPlacement{},
+		&models.TournamentRecord{},     // torneos con su imagen de Top 8 (para la web)
 		&models.Matchmaking{},
 		&models.MatchmakingPlayer{},
 		&models.User{},                // login con Discord
