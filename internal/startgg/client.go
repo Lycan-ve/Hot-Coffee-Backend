@@ -280,12 +280,13 @@ func ExtractTournamentsAndImages(messages []DiscordMessage) []TournamentInfo {
 }
 
 // 🆕 recordResult guarda los puntos de un jugador en UN evento.
-// Si el mismo jugador aparece dos veces en el mismo evento, suma.
+// Si el mismo jugador aparece dos veces en el mismo evento (p. ej. dos
+// equipos en un 2v2), conserva su MEJOR puntaje: nunca suma doble.
 func recordResult(tx *gorm.DB, playerID, eventID, points int) error {
 	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "player_id"}, {Name: "league"}, {Name: "event_id"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"points": gorm.Expr("player_results.points + ?", points),
+			"points": gorm.Expr("GREATEST(player_results.points, ?)", points),
 		}),
 	}).Create(&models.PlayerResult{
 		PlayerID: playerID,

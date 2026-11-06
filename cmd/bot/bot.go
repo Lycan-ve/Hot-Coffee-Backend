@@ -84,6 +84,13 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 
 	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
 	startgg.SyncManualTournaments(db, activeMembers)
+
+	// 4. Reconstruye el ranking desde el historial de torneos: garantiza que
+	//    los puntos del ranking coincidan exactamente con la suma de los
+	//    torneos que muestra el perfil web y repara dobles sumas históricas.
+	if _, err := startgg.RepairRankingFromPlacements(db); err != nil {
+		log.Printf("⚠️  No se pudo reconstruir el ranking desde el historial: %v", err)
+	}
 	log.Printf("✅ Sincronización de torneos finalizada.")
 	return true
 }
