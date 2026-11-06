@@ -55,14 +55,30 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 		return false
 	}
 
-	// 2. Sincroniza leyendo los links de Start.gg publicados en el canal del
-	//    calendario de Discord (canal configurado en la variable DISCORD_CALENDAR_CHANNEL_ID)
-	calendarID := os.Getenv("DISCORD_CALENDAR_CHANNEL_ID")
-	if calendarID == "" {
-		log.Println("🛑 DISCORD_CALENDAR_CHANNEL_ID no está configurado en el .env: se cancela la sync de torneos.")
+		// 2. Sincroniza leyendo los links de Start.gg publicados en los canales de
+	//    Discord: el del calendario (DISCORD_CALENDAR_CHANNEL_ID) y el de
+	//    torneos (DISCORD_TOURNAMENT_CHANNEL_ID). Basta con que uno de los dos
+	//    esté configurado; los mensajes de ambos canales se combinan y se
+	//    preprocesan juntos (la sync es idempotente por event_id, así que un
+	//    mismo torneo publicado en los dos canales se procesa una sola vez).
+	seen := make(map[string]bool)
+	var channelIDs []string
+	for _, id := range []string{os.Getenv("DISCORD_CALENDAR_CHANNEL_ID"), os.Getenv("DISCORD_TOURNAMENT_CHANNEL_ID")} {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		channelIDs = append(channelIDs, id)
+	}
+	if len(channelIDs) == 0 {
+		log.Println("🛑 Ni DISCORD_CALENDAR_CHANNEL_ID ni DISCORD_TOURNAMENT_CHANNEL_ID están configurados en el .env: se cancela la sync de torneos.")
 		return false
 	}
-	messages := discord.FetchTournamentMessagesFromChannel(dgSession, calendarID)
+
+	var messages []startgg.DiscordMessage
+	for _, id := range channelIDs {
+		messages = append(messages, discord.FetchTournamentMessagesFromChannel(dgSession, id)...)
+	}
 	tournaments := startgg.ExtractTournamentsAndImages(messages)
 	startgg.SyncTournamentsFromDiscordLive(tournaments, startGGToken, db, activeMembers)
 
