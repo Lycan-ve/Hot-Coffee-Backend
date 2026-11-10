@@ -614,16 +614,15 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			AvatarURL:     user.AvatarURL,
 		},
 		"stats": map[string]any{
-			"points":          ranks.BasePoints + mmEarned,
-			"wins":            mp.Wins,
-			"losses":          mp.Losses,
+			"points":             ranks.BasePoints + mmEarned,
+			"wins":               mp.Wins,
+			"losses":             mp.Losses,
 			"rankingPosition":    position,
 			"tournamentPoints":   tournamentPoints,
 			"tournamentPosition": tournamentPosition,
 		},
 		"rank":  ranks.FromPoints(mp.Points),
 		"mains": makeProfileTeam(user.MainChar1, user.MainChar2, user.MainFuse),
-		"rank": ranks.FromPoints(mp.Points),
 	}
 	if includeHistory {
 		response["fights"] = getProfileFights(discordID)
