@@ -16,6 +16,7 @@ import (
 
 	"smash-backend/internal/gamechars"
 	"smash-backend/internal/models"
+	"smash-backend/internal/presence"
 	"smash-backend/internal/ranks"
 
 	jwt "github.com/golang-jwt/jwt/v5"
@@ -625,6 +626,8 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 		"rank":  ranks.FromPoints(mp.Points),
 		"mains": makeProfileTeam(user.MainChar1, user.MainChar2, user.MainFuse),
 	}
+	// Estado de Discord en vivo (lo escribe el bot desde el Gateway).
+	response["presence"] = presence.Get(discordID)
 	if includeHistory {
 		response["fights"] = getProfileFights(discordID)
 		response["tournaments"] = getProfileTournaments(discordID)

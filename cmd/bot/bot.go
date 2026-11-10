@@ -13,6 +13,7 @@ import (
 	"smash-backend/internal/database"
 	"smash-backend/internal/discord"
 	"smash-backend/internal/models"
+	"smash-backend/internal/presence"
 	"smash-backend/internal/startgg"
 
 	"github.com/bwmarrin/discordgo"
@@ -95,6 +96,40 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	return true
 }
 
+// onPresenceUpdate guarda cada cambio de estado de un miembro del servidor.
+// Discord lo entrega en tiempo real por el Gateway; la API lo lee de la tabla.
+func onPresenceUpdate(_ *discordgo.Session, p *discordgo.PresenceUpdate) {
+	if p == nil || p.User == nil {
+		return
+	}
+	presence.Set(p.User.ID, string(p.Status), playingName(p.Activities))
+}
+
+// onGuildPresencesBackfill: al conectar (y en cada reconexión) GUILD_CREATE
+// trae el estado actual de todos los miembros; sin este backfill la web
+// mostraría "desconectado" hasta que cada jugador cambiara de estado.
+func onGuildPresencesBackfill(_ *discordgo.Session, g *discordgo.GuildCreate) {
+	n := 0
+	for _, pr := range g.Presences {
+		if pr == nil || pr.User == nil {
+			continue
+		}
+		presence.Set(pr.User.ID, string(pr.Status), playingName(pr.Activities))
+		n++
+	}
+	log.Printf("👀 Presencias iniciales cargadas (%d miembros con estado conocido).", n)
+}
+
+// playingName devuelve el nombre del juego en curso (2XKO, etc.) o "".
+func playingName(activities []*discordgo.Activity) string {
+	for _, a := range activities {
+		if a != nil && a.Type == discordgo.ActivityTypePlaying {
+			return a.Name
+		}
+	}
+	return ""
+}
+
 // startHealthServer: endpoint mínimo para UptimeRobot.
 // Los hosts gratuitos duermen sin tráfico: el ping cada 5 min mantiene al bot despierto.
 func startHealthServer() {
@@ -144,10 +179,19 @@ func main() {
 	}
 
 	// Configuración de Intents requeridos por Discord (Guilds, Mensajes y Miembros)
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers
+	// IntentsGuildPresences: estado en vivo de los miembros. Requiere activar
+	// "SERVER PRESENCES INTENT" en el Discord Developer Portal, o dg.Open()
+	// fallará con "used disallowed intents".
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers | discordgo.IntentsGuildPresences
 
 	// Registrar manejadores de eventos (escuchadores de clics de botones y slash commands)
 	discord.RegisterMatchmakingHandlers(dg, db)
+
+	// 👀 Presencias en vivo: el bot guarda el estado de cada miembro en la BD
+	// y la API (cmd/api, otro proceso) lo lee para mostrarlo en la web.
+	presence.Init(db)
+	dg.AddHandler(onPresenceUpdate)
+	dg.AddHandler(onGuildPresencesBackfill)
 
 	// Janitor de matchmaking: auto-confirmaciones, cierres y cancelaciones automáticas
 	discord.StartMatchmakingJanitor(dg, db)
