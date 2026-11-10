@@ -123,7 +123,9 @@ func onGuildPresencesBackfill(_ *discordgo.Session, g *discordgo.GuildCreate) {
 // playingName devuelve el nombre del juego en curso (2XKO, etc.) o "".
 func playingName(activities []*discordgo.Activity) string {
 	for _, a := range activities {
-		if a != nil && a.Type == discordgo.ActivityTypePlaying {
+		// 0 = ActivityTypePlaying (jugando). discordgo v0.29 no exporta la
+		// constante, por eso se compara con el valor literal.
+		if a != nil && a.Type == 0 {
 			return a.Name
 		}
 	}
