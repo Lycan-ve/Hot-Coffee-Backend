@@ -605,6 +605,7 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 		db.Model(&models.Player{}).Where("league = ? AND points > ?", "2xko_online", tournamentPoints).Count(&ahead)
 		tournamentPosition = int(ahead) + 1
 	}
+
 	response := map[string]any{
 		"user": publicUser{
 			DiscordID:     user.DiscordID,
@@ -614,9 +615,9 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			AvatarURL:     user.AvatarURL,
 		},
 		"stats": map[string]any{
-			"points":             ranks.BasePoints + mmEarned,
-			"wins":               mp.Wins,
-			"losses":             mp.Losses,
+			"points":          ranks.BasePoints + mmEarned,
+			"wins":            mp.Wins,
+			"losses":          mp.Losses,
 			"rankingPosition":    position,
 			"tournamentPoints":   tournamentPoints,
 			"tournamentPosition": tournamentPosition,
