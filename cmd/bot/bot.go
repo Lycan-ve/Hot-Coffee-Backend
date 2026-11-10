@@ -318,6 +318,30 @@ func main() {
 		}()
 	}()
 
+	// 👀 Refresco periódico de presencias: Discord solo emite eventos cuando el
+	// estado CAMBIA, así que un usuario que lleva rato en línea tendría su fila
+	// vieja y la API la marcaría desconectado. Cada 4 min se reescribe el estado
+	// completo desde dg.State (el backfill de GUILD_CREATE solo corre al conectar).
+	go func() {
+		ticker := time.NewTicker(4 * time.Minute)
+		for range ticker.C {
+			if dg.State == nil {
+				continue
+			}
+			n := 0
+			for _, pr := range dg.State.Presences {
+				if pr == nil || pr.User == nil {
+					continue
+				}
+				presence.Set(pr.User.ID, string(pr.Status), playingName(pr.Activities))
+				n++
+			}
+			if n > 0 {
+				log.Printf("👀 Presencias refrescadas (%d miembros).", n)
+			}
+		}
+	}()
+
 	// Cierre limpio: con SIGINT/SIGTERM se desconecta Discord y el health server
 	// se apaga sin dejar hilos ni paneles a medias.
 	sigCh := make(chan os.Signal, 1)

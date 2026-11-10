@@ -58,7 +58,9 @@ func Set(discordID, status, activity string) {
 }
 
 // Get devuelve el estado de un usuario. Sin fila, o con datos viejos
-// (más de 5 minutos: el bot pudo perder eventos al reconectarse), es offline.
+// (más de 10 minutos: el bot está caído o perdió eventos), es offline.
+// El bot reescribe todos los estados cada 4 min, así que una fila fresca
+// nunca llega a los 10 min mientras el bot esté vivo.
 func Get(discordID string) Presence {
 	off := Presence{DiscordID: discordID, Status: "offline"}
 	if db == nil || discordID == "" {
@@ -68,7 +70,7 @@ func Get(discordID string) Presence {
 	if err := db.Where("discord_id = ?", discordID).First(&row).Error; err != nil {
 		return off
 	}
-	if time.Since(row.UpdatedAt) > 5*time.Minute {
+	if time.Since(row.UpdatedAt) > 10*time.Minute {
 		row.Status = "offline"
 		row.Activity = ""
 	}
