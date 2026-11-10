@@ -14,6 +14,7 @@ import (
 	"smash-backend/internal/database"
 	"smash-backend/internal/gamechars"
 	"smash-backend/internal/models"
+	"smash-backend/internal/presence"
 	"smash-backend/internal/webmatch"
 	"smash-backend/internal/webqueue"
 
@@ -148,6 +149,11 @@ func main() {
 	// Carga las variables del archivo .env si se ejecuta localmente
 	godotenv.Load()
 	db = database.Connect()
+
+	// 👀 Presencias: inicializar el paquete presence TAMBIÉN en la API.
+	// Sin esto su db interna queda nil y Get() devolvería siempre "offline"
+	// aunque el bot esté guardando los estados en la tabla discord_presences.
+	presence.Init(db)
 
 	// ==========================================
 	// RUTAS HTTP (API REST)
