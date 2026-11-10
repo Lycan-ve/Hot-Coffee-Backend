@@ -591,6 +591,20 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 		position = int(ahead) + 1
 	}
 
+	// Torneos: puntos acumulados y posición en la tabla de TORNEOS (independiente
+	// del matchmaking). La mejor entrada del jugador define sus puntos; la
+	// posición es cuántos jugadores tienen más puntos + 1, como en el ranking web.
+	tournamentPoints := 0
+	var tBest models.Player
+	if err := db.Where("discord_id = ? AND league = ?", discordID, "2xko_online").Order("points DESC").First(&tBest).Error; err == nil {
+		tournamentPoints = tBest.Points
+	}
+	tournamentPosition := 0
+	if tournamentPoints > 0 {
+		var ahead int64
+		db.Model(&models.Player{}).Where("league = ? AND points > ?", "2xko_online", tournamentPoints).Count(&ahead)
+		tournamentPosition = int(ahead) + 1
+	}
 	response := map[string]any{
 		"user": publicUser{
 			DiscordID:     user.DiscordID,
@@ -603,8 +617,12 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			"points":          ranks.BasePoints + mmEarned,
 			"wins":            mp.Wins,
 			"losses":          mp.Losses,
-			"rankingPosition": position,
+			"rankingPosition":    position,
+			"tournamentPoints":   tournamentPoints,
+			"tournamentPosition": tournamentPosition,
 		},
+		"rank":  ranks.FromPoints(mp.Points),
+		"mains": makeProfileTeam(user.MainChar1, user.MainChar2, user.MainFuse),
 		"rank": ranks.FromPoints(mp.Points),
 	}
 	if includeHistory {
@@ -644,12 +662,77 @@ func handlePublicProfile(w http.ResponseWriter, r *http.Request) {
 	writeProfile(w, discordID, true)
 }
 
+// handleMains: GET/POST /api/auth/mains — equipo principal (mains) del jugador.
+// GET devuelve el equipo guardado; POST valida los IDs contra el roster de
+// 2XKO y lo guarda en la fila del usuario.
+func handleMains(w http.ResponseWriter, r *http.Request) {
+	if setCors(w, r) {
+		return
+	}
+	discordID, ok := bearerDiscordID(r)
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "no_autenticado"})
+		return
+	}
+
+	var user models.User
+	if err := db.Where("discord_id = ?", discordID).First(&user).Error; err != nil {
+		// El JWT solo lo tiene quien inició sesión: la fila debería existir,
+		// pero por robustez se crea si falta.
+		user = models.User{DiscordID: discordID, FirstLogin: time.Now(), LastLogin: time.Now()}
+	}
+
+	if r.Method == http.MethodPost {
+		var body struct {
+			Char1 string `json:"char1"`
+			Char2 string `json:"char2"`
+			Fuse  string `json:"fuse"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "cuerpo_invalido",
+				"message": "Envía char1, char2 y fuse en formato JSON.",
+			})
+			return
+		}
+		if !gamechars.ValidCharacter(body.Char1) || !gamechars.ValidCharacter(body.Char2) || !gamechars.ValidFuse(body.Fuse) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "equipo_invalido",
+				"message": "Los personajes y la fusión deben ser del roster de 2XKO.",
+			})
+			return
+		}
+		user.MainChar1 = body.Char1
+		user.MainChar2 = body.Char2
+		user.MainFuse = body.Fuse
+		if err := db.Save(&user).Error; err != nil {
+			log.Println("❌ Mains: error guardando el equipo:", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"mains": makeProfileTeam(user.MainChar1, user.MainChar2, user.MainFuse),
+	})
+}
+
 // RegisterRoutes registra todas las rutas de auth y perfiles.
 func RegisterRoutes(database *gorm.DB) {
 	db = database
 	http.HandleFunc("/api/auth/discord/login", handleLogin)
 	http.HandleFunc("/api/auth/discord/callback", handleCallback)
 	http.HandleFunc("/api/auth/me", handleMe)
+	http.HandleFunc("/api/auth/mains", handleMains)
 	http.HandleFunc("/api/users/profile/", handlePublicProfile)
 	fmt.Println("✅ Rutas de autenticación y perfiles registradas.")
 }

@@ -12,6 +12,10 @@ type User struct {
 	GuildNickname string    `json:"guildNickname"` // apodo dentro del servidor
 	AvatarURL     string    `json:"avatarUrl"`
 	Roles         string    `json:"roles"` // IDs de roles separados por coma
+	// Equipo principal (mains) elegido en la web: los 2 personajes y la fusión.
+	MainChar1     string    `json:"mainChar1"` // Personaje 1 (point)
+	MainChar2     string    `json:"mainChar2"` // Personaje 2 (assist)
+	MainFuse      string    `json:"mainFuse"`  // Fusión
 	FirstLogin    time.Time `json:"firstLogin"`
 	LastLogin     time.Time `json:"lastLogin"`
 }
