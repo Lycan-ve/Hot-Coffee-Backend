@@ -29,6 +29,15 @@ const syncInterval = 6 * time.Hour
 // mismo jugador (lost-update) aunque cada evento se procesara una sola vez.
 var syncMu sync.Mutex
 
+// presSnapshot: último estado conocido de cada miembro (lo alimentan
+// onPresenceUpdate y el backfill de GUILD_CREATE). El refresco periódico lo
+// reescribe en la BD para que las filas no envejezcan: Discord solo avisa
+// cuando el estado CAMBIA, y la API marca "offline" las filas con más de 10 min.
+var (
+	presMu       sync.Mutex
+	presSnapshot = map[string][2]string{} // discordID -> {status, actividad}
+)
+
 // runFullSync ejecuta el proceso completo de sincronización de torneos de Start.gg
 // (es la misma función que vivía en cmd/api/main.go: necesita la sesión del bot).
 // Devuelve false si ya había una sync en curso (el llamador decide si reintenta)
@@ -102,7 +111,11 @@ func onPresenceUpdate(_ *discordgo.Session, p *discordgo.PresenceUpdate) {
 	if p == nil || p.User == nil {
 		return
 	}
-	presence.Set(p.User.ID, string(p.Status), playingName(p.Activities))
+	act := playingName(p.Activities)
+	presMu.Lock()
+	presSnapshot[p.User.ID] = [2]string{string(p.Status), act}
+	presMu.Unlock()
+	presence.Set(p.User.ID, string(p.Status), act)
 }
 
 // onGuildPresencesBackfill: al conectar (y en cada reconexión) GUILD_CREATE
@@ -114,7 +127,11 @@ func onGuildPresencesBackfill(_ *discordgo.Session, g *discordgo.GuildCreate) {
 		if pr == nil || pr.User == nil {
 			continue
 		}
-		presence.Set(pr.User.ID, string(pr.Status), playingName(pr.Activities))
+		act := playingName(pr.Activities)
+		presMu.Lock()
+		presSnapshot[pr.User.ID] = [2]string{string(pr.Status), act}
+		presMu.Unlock()
+		presence.Set(pr.User.ID, string(pr.Status), act)
 		n++
 	}
 	log.Printf("👀 Presencias iniciales cargadas (%d miembros con estado conocido).", n)
@@ -318,26 +335,24 @@ func main() {
 		}()
 	}()
 
-	// 👀 Refresco periódico de presencias: Discord solo emite eventos cuando el
-	// estado CAMBIA, así que un usuario que lleva rato en línea tendría su fila
-	// vieja y la API la marcaría desconectado. Cada 4 min se reescribe el estado
-	// completo desde dg.State (el backfill de GUILD_CREATE solo corre al conectar).
+	// 👀 Refresco periódico de presencias: reescribe el snapshot en la BD para
+	// que ninguna fila pase los 10 min de antigüedad (la API las marcaría
+	// offline). discordgo v0.29 no expone las presencias en dg.State, por eso
+	// se usa el snapshot propio que alimentan los handlers de presencia.
 	go func() {
 		ticker := time.NewTicker(4 * time.Minute)
 		for range ticker.C {
-			if dg.State == nil {
-				continue
+			presMu.Lock()
+			snap := make(map[string][2]string, len(presSnapshot))
+			for id, v := range presSnapshot {
+				snap[id] = v
 			}
-			n := 0
-			for _, pr := range dg.State.Presences {
-				if pr == nil || pr.User == nil {
-					continue
-				}
-				presence.Set(pr.User.ID, string(pr.Status), playingName(pr.Activities))
-				n++
+			presMu.Unlock()
+			for id, v := range snap {
+				presence.Set(id, v[0], v[1])
 			}
-			if n > 0 {
-				log.Printf("👀 Presencias refrescadas (%d miembros).", n)
+			if len(snap) > 0 {
+				log.Printf("👀 Presencias refrescadas (%d miembros).", len(snap))
 			}
 		}
 	}()
