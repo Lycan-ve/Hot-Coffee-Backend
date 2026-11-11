@@ -79,6 +79,9 @@ type MatchmakingPlayer struct {
 	Wins      int       `json:"wins"`
 	Losses    int       `json:"losses"`
 	Streak    int       `json:"streak"` // victorias seguidas: 3+ empareja contra un rango superior
-	UpdatedAt time.Time `json:"updatedAt"`
+	// Escudo anti-descenso: se gana al ascender de división y se consume con
+	// la primera derrota que bajaría de división (esa cae solo a 0 LP).
+	DemotionShield bool      `json:"demotionShield"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 	Ranking   int       `json:"ranking" gorm:"-"`
 }

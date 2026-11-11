@@ -68,6 +68,7 @@ func RegisterRoutes(database *gorm.DB) {
 	http.HandleFunc("/api/matchmaking/queue/state", handleState)
 	http.HandleFunc("/api/matchmaking/accept", handleAccept)
 	http.HandleFunc("/api/matchmaking/decline", handleDecline)
+	http.HandleFunc("/api/matchmaking/rematch", handleRematch)
 
 	go startSweeper()
 	fmt.Println("✅ Rutas de matchmaking web registradas (cola automática).")
@@ -196,14 +197,25 @@ func playerPoints(discordID string) int {
 }
 
 // playerCard arma la ficha de un jugador para el VS de la propuesta.
+// Incluye récord y racha (de matchmaking_players) para dar contexto del rival.
 func playerCard(discordID, tag, avatar string, points int) map[string]any {
-	return map[string]any{
+	card := map[string]any{
 		"discordId": discordID,
 		"tag":       tag,
 		"avatarUrl": avatar,
 		"points":    points + ranks.BasePoints,
 		"rank":      ranks.FromPoints(points),
+		"wins":      0,
+		"losses":    0,
+		"streak":    0,
 	}
+	var mp models.MatchmakingPlayer
+	if err := db.Where("discord_id = ?", discordID).First(&mp).Error; err == nil {
+		card["wins"] = mp.Wins
+		card["losses"] = mp.Losses
+		card["streak"] = mp.Streak
+	}
+	return card
 }
 
 func threadURL(threadID string) string {
@@ -732,3 +744,120 @@ func handleDecline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+
+// ---------------------------------------------------------------------------
+// POST /api/matchmaking/rematch — revancha directa tras un set
+// ---------------------------------------------------------------------------
+
+// Ventana para pedir revancha: solo tiene sentido justo después de terminar.
+const rematchRequestTTL = 15 * time.Minute
+
+// handleRematch crea una propuesta de revancha contra el rival del último set
+// terminado. Quien la pide queda ya aceptado; el rival la ve en su pantalla de
+// matchmaking (o como aviso en la sala) y la acepta o rechaza ahí. Es la vía
+// "oficial" para repetir rival: el anti-revancha de la cola no aplica aquí
+// porque ambos tienen que aceptar de nuevo.
+func handleRematch(w http.ResponseWriter, r *http.Request) {
+	if auth.PreflightCors(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "metodo", "usa POST")
+		return
+	}
+	discordID, ok := auth.UserIDFromRequest(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "no_autenticado", "inicia sesión con Discord")
+		return
+	}
+
+	// Quien la pide: libre de sets, propuestas y cola.
+	if active, err := hasActiveMatch(discordID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "bd", "error interno")
+		return
+	} else if active {
+		writeErr(w, http.StatusConflict, "set_activo", "ya tienes un set en curso")
+		return
+	}
+	if p, err := activeProposal(discordID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "bd", "error interno")
+		return
+	} else if p != nil {
+		writeErr(w, http.StatusConflict, "propuesta_abierta", "ya tienes una propuesta pendiente")
+		return
+	}
+	var qn int64
+	db.Model(&models.MatchmakingQueue{}).Where("discord_id = ?", discordID).Count(&qn)
+	if qn > 0 {
+		writeErr(w, http.StatusConflict, "en_cola", "sal de la cola primero para proponer una revancha")
+		return
+	}
+
+	// Último set FINISHED del jugador (la revancha es contra su rival de ahí),
+	// y tiene que ser reciente.
+	var last models.Matchmaking
+	if err := db.Where("status = ? AND (player1_discord_id = ? OR player2_discord_id = ?)",
+		"FINISHED", discordID, discordID).Order("id DESC").First(&last).Error; err != nil {
+		writeErr(w, http.StatusNotFound, "sin_set", "no hay ningún set terminado reciente para la revancha")
+		return
+	}
+	if time.Since(last.UpdatedAt) > rematchRequestTTL {
+		writeErr(w, http.StatusConflict, "set_viejo", "la revancha solo se puede pedir justo después de terminar un set")
+		return
+	}
+	opp := last.Player1DiscordID
+	if last.Player1DiscordID == discordID {
+		opp = last.Player2DiscordID
+	}
+	if opp == discordID {
+		writeErr(w, http.StatusBadRequest, "rival", "no se pudo identificar al rival del último set")
+		return
+	}
+
+	// El rival también tiene que estar libre.
+	if active, err := hasActiveMatch(opp); err != nil {
+		writeErr(w, http.StatusInternalServerError, "bd", "error interno")
+		return
+	} else if active {
+		writeErr(w, http.StatusConflict, "rival_ocupado", "tu rival ya está en otro set")
+		return
+	}
+	if p, err := activeProposal(opp); err != nil {
+		writeErr(w, http.StatusInternalServerError, "bd", "error interno")
+		return
+	} else if p != nil {
+		writeErr(w, http.StatusConflict, "rival_ocupado", "tu rival ya tiene una propuesta pendiente")
+		return
+	}
+	var qo int64
+	db.Model(&models.MatchmakingQueue{}).Where("discord_id = ?", opp).Count(&qo)
+	if qo > 0 {
+		writeErr(w, http.StatusConflict, "rival_en_cola", "tu rival ya está buscando otro set: búscalo ahí")
+		return
+	}
+
+	tag1, av1 := playerSnapshot(discordID)
+	tag2, av2 := playerSnapshot(opp)
+	pts1, pts2 := playerPoints(discordID), playerPoints(opp)
+	proposal := models.MatchmakingProposal{
+		Player1DiscordID: discordID,
+		Player1Tag:       tag1,
+		Player1Avatar:    av1,
+		Player1Points:    pts1,
+		Accept1:          true, // quien la pide ya aceptó
+		Player2DiscordID: opp,
+		Player2Tag:       tag2,
+		Player2Avatar:    av2,
+		Player2Points:    pts2,
+		TargetFT:         3,
+		PointsAtStake:    ranks.MaxStakeOf(pts1, pts2),
+		Status:           proposalWaiting,
+		CreatedAt:        time.Now(),
+		ExpiresAt:        time.Now().Add(proposalTTL),
+	}
+	if err := db.Create(&proposal).Error; err != nil {
+		writeErr(w, http.StatusInternalServerError, "bd", "error interno")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "proposalId": proposal.ID})
+}

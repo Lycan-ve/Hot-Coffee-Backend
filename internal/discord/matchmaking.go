@@ -1697,11 +1697,23 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 	if loserNew > loser.Points { // perder nunca sube los puntos
 		loserNew = loser.Points
 	}
+	// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
+	// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
+	if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
+		if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
+			loserNew = floor
+		}
+		loser.DemotionShield = false
+	}
 
 	m.PointsAtStake = stake
 	m.WinnerDelta = stake
 	m.LoserDelta = loserNew - loser.Points
 
+	// Ascender de división (re)otorga el escudo anti-descenso.
+	if ranks.DivisionIndexOf(winner.Points+stake) > ranks.DivisionIndexOf(winner.Points) {
+		winner.DemotionShield = true
+	}
 	winner.Points += stake
 	winner.Wins++
 	winner.Streak++ // racha de victorias: 3+ empareja contra un rango superior
@@ -1869,123 +1881,6 @@ func getGameKeyboard(matchID uint, p1Tag, p2Tag string) []discordgo.MessageCompo
 			discordgo.Button{
 				Label:    "📋 Resultado final",
 				Style:    discordgo.PrimaryButton,
-				CustomID: fmt.Sprintf("ft_fullset_%d", matchID),
-			},
-			discordgo.Button{
-				Label:    "🏳️ Cerrar set",
-				Style:    discordgo.SecondaryButton,
-				CustomID: fmt.Sprintf("ft_close_%d", matchID),
-			},
-		}},
-	}
-}
-
-// getFullSetKeyboard: 2 dropdowns (games de cada jugador, 0..FT) + volver.
-func getFullSetKeyboard(m models.Matchmaking) []discordgo.MessageComponent {
-	one := 1
-	opts := make([]discordgo.SelectMenuOption, 0, m.TargetFT+1)
-	for n := 0; n <= m.TargetFT; n++ {
-		opts = append(opts, discordgo.SelectMenuOption{Label: strconv.Itoa(n), Value: strconv.Itoa(n)})
-	}
-	row := func(sm discordgo.SelectMenu) discordgo.ActionsRow {
-		return discordgo.ActionsRow{Components: []discordgo.MessageComponent{sm}}
-	}
-	return []discordgo.MessageComponent{
-		row(discordgo.SelectMenu{
-			MenuType:    discordgo.StringSelectMenu,
-			CustomID:    fmt.Sprintf("ft_fs1_%d", m.ID),
-			Placeholder: fmt.Sprintf("🏆 Games de %s", m.Player1Tag),
-			MinValues:   &one,
-			MaxValues:   one,
-			Options:     opts,
-		}),
-		row(discordgo.SelectMenu{
-			MenuType:    discordgo.StringSelectMenu,
-			CustomID:    fmt.Sprintf("ft_fs2_%d", m.ID),
-			Placeholder: fmt.Sprintf("🏆 Games de %s", m.Player2Tag),
-			MinValues:   &one,
-			MaxValues:   one,
-			Options:     opts,
-		}),
-		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{
-				Label:    "◀️ Volver a reportar por games",
-				Style:    discordgo.SecondaryButton,
-				CustomID: fmt.Sprintf("ft_back_%d", m.ID),
-			},
-		}},
-	}
-}
-
-// getCloseKeyboard: panel de propuesta de cierre (rondas bloqueadas mientras esté activo).
-func getCloseKeyboard(matchID uint) discordgo.ActionsRow {
-	return discordgo.ActionsRow{
-		Components: []discordgo.MessageComponent{
-			discordgo.Button{
-				Label:    "✅ Aceptar cierre",
-				Style:    discordgo.SuccessButton,
-				CustomID: fmt.Sprintf("ft_acceptclose_%d", matchID),
-			},
-			discordgo.Button{
-				Label:    "▶️ Seguir jugando",
-				Style:    discordgo.SecondaryButton,
-				CustomID: fmt.Sprintf("ft_declineclose_%d", matchID),
-			},
-		},
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Contenido de los paneles
-// ---------------------------------------------------------------------------
-
-// teamPanelEmbed: ficha del jugador. La FUSIÓN manda: al confirmar, encabeza el
-// título y el embed pasa a dorado; mientras, slots con estado (✔ / por elegir).
-func teamPanelEmbed(m models.Matchmaking, side string) *discordgo.MessageEmbed {
-	tag, avatar, c1, c2, fuse := m.Player1Tag, m.Player1Avatar, m.P1Char1, m.P1Char2, m.P1Fuse
-	complete := m.P1TeamComplete()
-	if side == "p2" {
-		tag, avatar, c1, c2, fuse = m.Player2Tag, m.Player2Avatar, m.P2Char1, m.P2Char2, m.P2Fuse
-		complete = m.P2TeamComplete()
-	}
-
-	embed := &discordgo.MessageEmbed{}
-	if avatar != "" {
-		embed.Author = &discordgo.MessageEmbedAuthor{Name: tag, IconURL: avatar}
-	}
-
-	if complete {
-		embed.Color = 0xFEE75C // dorado: equipo listo
-		embed.Title = fmt.Sprintf("⚡ %s · FT %d", gamechars.FuseName(fuse), m.TargetFT)
-		embed.Description = fmt.Sprintf("🔒 **%s + %s**", gamechars.CharacterName(c1), gamechars.CharacterName(c2))
-		return embed
-	}
-
-	charSlot := func(label, id string) string {
-		if n := gamechars.CharacterName(id); n != "" {
-			return fmt.Sprintf("%s — **%s** ✔", label, n)
-		}
-		return fmt.Sprintf("%s — *por elegir*", label)
-	}
-	fuseSlot := "🔀 Fusión — *por elegir*"
-	if n := gamechars.FuseName(fuse); n != "" {
-		fuseSlot = fmt.Sprintf("🔀 Fusión — **%s** ✔", n)
-	}
-	embed.Color = 0x5865F2
-	embed.Title = fmt.Sprintf("🧩 ARMA TU EQUIPO · FT %d", m.TargetFT)
-	embed.Description = fmt.Sprintf("%s\n%s\n%s", charSlot("1️⃣ Personaje 1", c1), charSlot("2️⃣ Personaje 2", c2), fuseSlot)
-	embed.Footer = &discordgo.MessageEmbedFooter{
-		Text: "La fusión define tu estilo — se muestra en la portada del embed",
-	}
-	return embed
-}
-
-// historyBlock construye el resumen del set con el ORDEN de las victorias:
-//
-//	game 1: **A** W - L **B**
-//	**Score** `2 - 0`
-func historyBlock(m *models.Matchmaking) string {
-	var hist []int
 	if b := []byte(m.RoundHistory); len(b) > 0 {
 		if err := json.Unmarshal(b, &hist); err != nil {
 			hist = nil

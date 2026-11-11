@@ -464,6 +464,24 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Propuesta de revancha activa: la sala terminada la muestra como banner
+	// (quien la pidió espera; el rival la ve para ir a aceptarla al matchmaking).
+	var rp models.MatchmakingProposal
+	if err := db.Where("status IN ? AND (player1_discord_id = ? OR player2_discord_id = ?)",
+		[]string{"WAITING", "CONFIRMED"}, discordID, discordID).
+		Order("id DESC").First(&rp).Error; err == nil {
+		oppTag := rp.Player2Tag
+		if rp.Side(discordID) == "p2" {
+			oppTag = rp.Player1Tag
+		}
+		resp["rematch"] = map[string]any{
+			"id":          rp.ID,
+			"byMe":        rp.Side(discordID) == "p1",
+			"opponentTag": oppTag,
+			"status":      rp.Status,
+		}
+	}
+
 	resp["match"] = matchPayload(m, discordID)
 	resp["messages"] = list
 	resp["lastMessageId"] = last
@@ -1228,11 +1246,23 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 	if loserNew > loser.Points { // perder nunca sube los puntos
 		loserNew = loser.Points
 	}
+	// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
+	// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
+	if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
+		if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
+			loserNew = floor
+		}
+		loser.DemotionShield = false
+	}
 
 	m.PointsAtStake = stake
 	m.WinnerDelta = stake
 	m.LoserDelta = loserNew - loser.Points
 
+	// Ascender de división (re)otorga el escudo anti-descenso.
+	if ranks.DivisionIndexOf(winner.Points+stake) > ranks.DivisionIndexOf(winner.Points) {
+		winner.DemotionShield = true
+	}
 	winner.Points += stake
 	winner.Wins++
 	winner.Streak++ // racha de victorias: 3+ empareja contra un rango superior

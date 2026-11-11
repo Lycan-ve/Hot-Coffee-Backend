@@ -93,3 +93,16 @@ func MaxStakeOf(pointsA, pointsB int) int {
 	return WinPoints(lo, hi)
 }
 
+// DivisionIndexOf: índice de división (0 = Iron I … 25 = Challenger) de unos
+// puntos GANADOS. La división i arranca en (i+1)·100 puntos TOTALES, es
+// decir, (i+1)·100 − BasePoints puntos ganados.
+func DivisionIndexOf(pointsWon int) int {
+	return FromPoints(pointsWon + BasePoints).DivisionIndex
+}
+
+// DivisionFloor: puntos ganados exactos del inicio de la división idx (0 LP).
+// Es donde aterriza una derrota consumiendo el escudo anti-descenso.
+func DivisionFloor(idx int) int {
+	return (idx+1)*LPPerDivision - BasePoints
+}
+
