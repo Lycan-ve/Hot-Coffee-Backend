@@ -1207,6 +1207,18 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 	// no importan. Vencer a un rango superior da más puntos; caer ante uno
 	// inferior cuesta más. Se recalculan AQUÍ con los rangos reales del final.
 	stake := ranks.WinPoints(winner.Points, loser.Points)
+	// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
+	// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
+	// perfecto sin ceder games. Se incluyen en WinnerDelta para que la sala
+	// muestre el LP real ganado.
+	stake += ranks.StreakBonus(winner.Streak)
+	winScore, loseScore := m.Score1, m.Score2
+	if winScore < loseScore {
+		winScore, loseScore = loseScore, winScore
+	}
+	if ranks.IsFlawless(winScore, loseScore, m.TargetFT) {
+		stake += ranks.FlawlessBonus
+	}
 	penalty := ranks.LosePoints(winner.Points, loser.Points)
 
 	loserNew := loser.Points - penalty

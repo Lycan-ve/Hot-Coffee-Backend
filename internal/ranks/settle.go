@@ -12,7 +12,34 @@ const (
 	LosePenaltyPerTier = 5  // castigo extra por cada nivel MÁS BAJO del rival
 	MinPointsFloor     = 5  // piso: nadie baja de 5 puntos ganados
 	StreakForUpperTier = 3  // racha de victorias que habilita rival de un rango arriba
+
+	// Bonos de LP (economía v2): premian el buen momento sin descontrolar
+	// el ritmo de subida (una racha larga sigue limitada por el tope).
+	WinStreakBonus = 5  // LP extra por cada victoria DENTRO de una racha de 3+
+	StreakBonusCap = 15 // tope del bonus de racha (desde la 6ª victoria seguida)
+	FlawlessBonus  = 5  // set perfecto: el ganador no cedió ni un game
 )
+
+// StreakBonus: LP extra que paga la victoria actual por venir en racha.
+// Recibe la racha ANTES de anotar esta victoria (3 victorias ya ganadas →
+// esta es la 4ª consecutiva). 3ª victoria: +5, 4ª: +10, 5ª: +15, 6ª+: +15
+// (tope). Devuelve 0 si la racha aún no califica.
+func StreakBonus(streakBefore int) int {
+	if streakBefore < StreakForUpperTier {
+		return 0
+	}
+	bonus := (streakBefore - StreakForUpperTier + 1) * WinStreakBonus
+	if bonus > StreakBonusCap {
+		bonus = StreakBonusCap
+	}
+	return bonus
+}
+
+// IsFlawless: ¿el ganador terminó el set sin ceder ni un game? Requiere
+// haber llegado al FT limpio (3-0 en FT 3). Un cierre anticipado 4-2 no cuenta.
+func IsFlawless(winnerScore, loserScore, targetFT int) bool {
+	return winnerScore >= targetFT && loserScore == 0
+}
 
 // TierOrder: niveles de la escalera, de menor a mayor.
 var TierOrder = []string{
@@ -65,3 +92,4 @@ func MaxStakeOf(pointsA, pointsB int) int {
 	}
 	return WinPoints(lo, hi)
 }
+

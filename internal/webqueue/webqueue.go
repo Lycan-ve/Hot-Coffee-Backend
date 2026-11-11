@@ -26,6 +26,15 @@ const (
 	adjacentTierAfter = 2 * time.Minute
 	anyTierAfter      = 4 * time.Minute
 
+	// Anti-rematch: NO repetir rival si ya jugaron un set hace poco (la cola
+	// rota rivales nuevos). Excepciones para no congelar el matchmaking:
+	//   - con poca gente activa la ventana se acorta (mejor repetir que no jugar);
+	//   - si alguno ya esperó rematchFallbackAfter, se acepta repetir.
+	rematchWindow           = 3 * time.Hour
+	rematchWindowSmallQueue = 30 * time.Minute
+	smallQueuePlayers       = 4
+	rematchFallbackAfter    = 3 * time.Minute
+
 	// Heartbeat: si el navegador no reporta vida en 45 s, sale de la cola.
 	heartbeatTimeout = 45 * time.Second
 	// Tiempo para la doble aceptación de la propuesta.
@@ -104,6 +113,32 @@ func canPairByRank(a, b models.MatchmakingQueue, streaks map[string]int, waited 
 		return true
 	}
 	return waited >= adjacentTierAfter
+}
+
+// recentOpponents consulta los sets FINISHED recientes entre jugadores de la
+// cola y devuelve el conjunto de parejas que ya se enfrentaron ("idA|idB",
+// con los IDs ordenados). Ante un error de BD devuelve vacío: es mejor
+// permitir repetir rival que congelar la cola.
+func recentOpponents(tx *gorm.DB, ids []string, window time.Duration) map[string]bool {
+	pairs := map[string]bool{}
+	if len(ids) < 2 {
+		return pairs
+	}
+	var rows []models.Matchmaking
+	if err := tx.Select("player1_discord_id", "player2_discord_id").
+		Where("status = ? AND created_at > ? AND (player1_discord_id IN ? OR player2_discord_id IN ?)",
+			"FINISHED", time.Now().Add(-window), ids, ids).
+		Find(&rows).Error; err != nil {
+		return pairs
+	}
+	for _, m := range rows {
+		a, b := m.Player1DiscordID, m.Player2DiscordID
+		if a > b {
+			a, b = b, a
+		}
+		pairs[a+"|"+b] = true
+	}
+	return pairs
 }
 
 // hasActiveMatch: ¿el usuario tiene una reta en curso (o pendiente)?
@@ -225,6 +260,21 @@ func tryMatch() error {
 			}
 		}
 
+		// Anti-rematch: ventana según cuánta gente haya en cola (con poca
+		// gente activa se permite repetir antes para no congelar el sistema).
+		window := rematchWindow
+		if len(entries) <= smallQueuePlayers {
+			window = rematchWindowSmallQueue
+		}
+		rematches := recentOpponents(tx, ids, window)
+		isRematch := func(a, b models.MatchmakingQueue) bool {
+			x, y := a.DiscordID, b.DiscordID
+			if x > y {
+				x, y = y, x
+			}
+			return rematches[x+"|"+y]
+		}
+
 		paired := make(map[string]bool, len(entries))
 		for i := range entries {
 			a := entries[i]
@@ -237,6 +287,13 @@ func tryMatch() error {
 					continue
 				}
 				if !canPairByRank(a, b, streaks, time.Since(a.JoinedAt)) {
+					continue
+				}
+				// No repetir rival reciente… salvo que alguno de los dos ya
+				// espere demasiado: repetir es mejor que esperar de más.
+				if isRematch(a, b) &&
+					time.Since(a.JoinedAt) < rematchFallbackAfter &&
+					time.Since(b.JoinedAt) < rematchFallbackAfter {
 					continue
 				}
 
@@ -510,6 +567,9 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 			// Informativo para el frontend viejo: ±100 pts ≈ un rango.
 			// El emparejamiento real es por RANGO (no por puntos).
 			"radius": 100,
+			// true cuando ya se aceptan rangos adyacentes (la búsqueda se
+			// amplió por tiempo de espera); el frontend puede mostrarlo.
+			"wide": time.Since(entry.JoinedAt) >= adjacentTierAfter,
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -671,3 +731,4 @@ func handleDecline(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
