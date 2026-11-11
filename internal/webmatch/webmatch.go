@@ -269,7 +269,6 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 	myScore, oppScore := m.Score1, m.Score2
 	meTag, meAvatar := m.Player1Tag, m.Player1Avatar
 	oppTag, oppAvatar := m.Player2Tag, m.Player2Avatar
-	mePts, oppPts := playerPoints(meID), playerPoints(oppID)
 	// Privacidad igual que el bot: el rival solo ve tu equipo COMPLETO.
 	meTeam := teamPayload(m.P1Char1, m.P1Char2, m.P1Fuse)
 	oppTeam := teamPayload(m.P2Char1, m.P2Char2, m.P2Fuse)
@@ -286,6 +285,9 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 		oppTeam = teamPayload("", "", "")
 	}
 
+	// Los puntos se leen DESPUES del intercambio p1/p2: antes quedaban
+	// cruzados cuando quien consultaba era el P2 (rango y puntos del rival).
+	mePts, oppPts := playerPoints(meID), playerPoints(oppID)
 	return map[string]any{
 		"id":            m.ID,
 		"ft":            m.TargetFT,
@@ -1312,3 +1314,4 @@ func sweep() {
 		db.Where("match_id IN ?", oldIDs).Delete(&models.MatchmakingMessage{})
 	}
 }
+
