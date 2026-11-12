@@ -528,6 +528,15 @@ func getProfileTournaments(discordID string) []profileTournament {
 	return tournaments
 }
 
+// profileRank: rango del jugador para el perfil. Sin las 5 partidas de
+// clasificación completadas no hay rango: Placed=false y la web muestra
+// "Clasificando (n/5)".
+func profileRank(mp models.MatchmakingPlayer) ranks.Info {
+	info := ranks.FromPoints(mp.Points)
+	info.Placed = mp.Wins+mp.Losses >= ranks.PlacementGames
+	return info
+}
+
 // writeProfile arma el perfil completo (identidad, stats, rango e historial).
 // Sirve tanto a /api/auth/me como a la ruta pública de perfiles.
 // publicUser expone solo los campos del perfil que usa el frontend. Nunca se
@@ -623,7 +632,7 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			"tournamentPoints":   tournamentPoints,
 			"tournamentPosition": tournamentPosition,
 		},
-		"rank":  ranks.FromPoints(mp.Points),
+		"rank":  profileRank(mp),
 		"mains": makeProfileTeam(user.MainChar1, user.MainChar2, user.MainFuse),
 	}
 	// Estado de Discord en vivo (lo escribe el bot desde el Gateway).

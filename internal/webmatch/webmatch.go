@@ -229,6 +229,23 @@ func playerPoints(discordID string) int {
 	return 0
 }
 
+// playerGames: sets terminados del jugador (0 si nunca jugó).
+func playerGames(discordID string) int {
+	var mp models.MatchmakingPlayer
+	if err := db.Where("discord_id = ?", discordID).First(&mp).Error; err == nil {
+		return mp.Wins + mp.Losses
+	}
+	return 0
+}
+
+// playerRank: rango para la sala. Sin las 5 partidas de clasificación
+// completadas no hay rango: Placed=false y la web muestra "Clasificando".
+func playerRank(pointsWon, games int) ranks.Info {
+	info := ranks.FromPoints(pointsWon)
+	info.Placed = games >= ranks.PlacementGames
+	return info
+}
+
 func roundHistory(m *models.Matchmaking) []int {
 	// Siempre NO nulo: un slice nil se serializa como JSON "null" y rompe
 	// el frontend de la sala (match.roundHistory.length).
@@ -300,7 +317,7 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 			"tag":       meTag,
 			"avatarUrl": meAvatar,
 			"points":    mePts + ranks.BasePoints,
-			"rank":      ranks.FromPoints(mePts),
+			"rank":      playerRank(mePts, playerGames(meID)),
 			"score":     myScore,
 			"team":      meTeam,
 		},
@@ -309,7 +326,7 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 			"tag":       oppTag,
 			"avatarUrl": oppAvatar,
 			"points":    oppPts + ranks.BasePoints,
-			"rank":      ranks.FromPoints(oppPts),
+			"rank":      playerRank(oppPts, playerGames(oppID)),
 			"score":     oppScore,
 			"team":      oppTeam,
 		},
@@ -401,7 +418,7 @@ func finishedPayload(m *models.Matchmaking, discordID string, myScore, oppScore 
 		"oppScore":  oppScore,
 		"delta":     delta,
 		"myPoints":  points + ranks.BasePoints,
-		"rank":      ranks.FromPoints(points),
+		"rank":      playerRank(points, playerGames(discordID)),
 		"winnerTag": sideTag(m, m.WinnerDiscordID),
 	}
 }
@@ -1221,46 +1238,70 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 		return errors.New("no se encontraron los jugadores del set")
 	}
 
-	// Puntos por RANGO (FT 3, partidas equitativas): las divisiones I/II/III
-	// no importan. Vencer a un rango superior da más puntos; caer ante uno
-	// inferior cuesta más. Se recalculan AQUÍ con los rangos reales del final.
-	stake := ranks.WinPoints(winner.Points, loser.Points)
-	// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
-	// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
-	// perfecto sin ceder games. Se incluyen en WinnerDelta para que la sala
-	// muestre el LP real ganado.
-	stake += ranks.StreakBonus(winner.Streak)
-	winScore, loseScore := m.Score1, m.Score2
-	if winScore < loseScore {
-		winScore, loseScore = loseScore, winScore
+	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus LP
+	// suben/bajan con deltas FIJOS de clasificación y el neto de esos 5 sets
+	// decide el rango inicial. El rival ya clasificado cobra con las reglas
+	// normales (el clasificante cuenta con el nivel de sus puntos actuales).
+	winnerPlacing := winner.Wins+winner.Losses < ranks.PlacementGames
+	loserPlacing := loser.Wins+loser.Losses < ranks.PlacementGames
+
+	var stake, penalty int
+	if winnerPlacing {
+		stake = ranks.PlacementWin
+	} else {
+		// Puntos por RANGO (FT 3, partidas equitativas): las divisiones I/II/III
+		// no importan. Vencer a un rango superior da más puntos; caer ante uno
+		// inferior cuesta más. Se recalculan AQUÍ con los rangos reales del final.
+		stake = ranks.WinPoints(winner.Points, loser.Points)
+		// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
+		// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
+		// perfecto sin ceder games. Se incluyen en WinnerDelta para que la sala
+		// muestre el LP real ganado.
+		stake += ranks.StreakBonus(winner.Streak)
+		winScore, loseScore := m.Score1, m.Score2
+		if winScore < loseScore {
+			winScore, loseScore = loseScore, winScore
+		}
+		if ranks.IsFlawless(winScore, loseScore, m.TargetFT) {
+			stake += ranks.FlawlessBonus
+		}
 	}
-	if ranks.IsFlawless(winScore, loseScore, m.TargetFT) {
-		stake += ranks.FlawlessBonus
+	if loserPlacing {
+		penalty = ranks.PlacementLoss
+	} else {
+		penalty = ranks.LosePoints(winner.Points, loser.Points)
 	}
-	penalty := ranks.LosePoints(winner.Points, loser.Points)
 
 	loserNew := loser.Points - penalty
-	if loserNew < ranks.MinPointsFloor {
-		loserNew = ranks.MinPointsFloor
-	}
-	if loserNew > loser.Points { // perder nunca sube los puntos
-		loserNew = loser.Points
-	}
-	// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
-	// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
-	if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
-		if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
-			loserNew = floor
+	if loserPlacing {
+		// Piso de la clasificación: con 0V-5D se aterriza en Plata II y no se
+		// baja más por perder en clasificación.
+		if loserNew < ranks.PlacementFloor {
+			loserNew = ranks.PlacementFloor
 		}
-		loser.DemotionShield = false
+	} else {
+		if loserNew < ranks.MinPointsFloor {
+			loserNew = ranks.MinPointsFloor
+		}
+		if loserNew > loser.Points { // perder nunca sube los puntos
+			loserNew = loser.Points
+		}
+		// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
+		// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
+		if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
+			if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
+				loserNew = floor
+			}
+			loser.DemotionShield = false
+		}
 	}
 
 	m.PointsAtStake = stake
 	m.WinnerDelta = stake
 	m.LoserDelta = loserNew - loser.Points
 
-	// Ascender de división (re)otorga el escudo anti-descenso.
-	if ranks.DivisionIndexOf(winner.Points+stake) > ranks.DivisionIndexOf(winner.Points) {
+	// Ascender de división (re)otorga el escudo anti-descenso (ya clasificado).
+	if !winnerPlacing && ranks.DivisionIndexOf(winner.Points+stake) > ranks.DivisionIndexOf(winner.Points) {
 		winner.DemotionShield = true
 	}
 	winner.Points += stake

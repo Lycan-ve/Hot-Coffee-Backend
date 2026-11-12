@@ -15,6 +15,7 @@ import (
 	"smash-backend/internal/gamechars"
 	"smash-backend/internal/models"
 	"smash-backend/internal/presence"
+	"smash-backend/internal/ranks"
 	"smash-backend/internal/webmatch"
 	"smash-backend/internal/webqueue"
 
@@ -123,6 +124,9 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 		} else {
 			players[i].Ranking = i + 1
 		}
+		// Clasificación: sets jugados y si ya obtuvo rango (5 sets).
+		players[i].Games = players[i].Wins + players[i].Losses
+		players[i].Placed = players[i].Games >= ranks.PlacementGames
 	}
 
 	json.NewEncoder(w).Encode(players)

@@ -64,6 +64,9 @@ type Info struct {
 	Progress      float64 `json:"progress"` // 0-100 % para la barra
 	IconPath      string  `json:"iconPath"` // p. ej. "Rangos/Gold_tier_2_icon.png"
 	Color         string  `json:"color"`
+	// Placed: false mientras el jugador cumple sus partidas de clasificación
+	// (lo marcan los llamadores: FromPoints no conoce las partidas jugadas).
+	Placed bool `json:"placed"`
 }
 
 func (d RankDef) displayName() string {
@@ -86,10 +89,14 @@ func iconPath(d RankDef) string {
 // totales se sube una división. 1.100 = Gold II, 2.500 = Grandmaster y
 // 2.600 = Challenger. GM/Challenger muestran RP total (LP fuera de juego).
 func FromPoints(points int) Info {
-	if points < 0 {
-		points = 0
-	}
+	// Los puntos ganados pueden ser NEGATIVOS durante la clasificación (las
+	// derrotas de clasificación restan más de lo que suman las victorias): no
+	// se recortan a 0; el total de rango simplemente puede quedar por debajo
+	// de la base (Plata o menor).
 	total := BasePoints + points
+	if total < 0 {
+		total = 0
+	}
 	idx := total/LPPerDivision - 1
 	if idx < 0 {
 		idx = 0

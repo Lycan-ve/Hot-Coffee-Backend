@@ -84,4 +84,8 @@ type MatchmakingPlayer struct {
 	DemotionShield bool      `json:"demotionShield"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 	Ranking   int       `json:"ranking" gorm:"-"`
+	// Calculados al servir la API, NO se guardan en la BD: sets terminados
+	// y si ya completó las 5 partidas de clasificación (tiene rango).
+	Games  int  `gorm:"-" json:"games"`
+	Placed bool `gorm:"-" json:"placed"`
 }

@@ -1609,6 +1609,9 @@ type matchReport struct {
 	WinnerPoints, LoserPoints int
 	OldRankW, NewRankW        int
 	OldRankL, NewRankL        int
+	// PlacedW/PlacedL: el jugador acabó de completar sus 5 sets de
+	// clasificación en este set (el reporte anuncia el rango obtenido).
+	PlacedW, PlacedL bool
 }
 
 // matchmakingRank devuelve la posición (empates comparten posición) de un jugador con esos puntos.
@@ -1672,46 +1675,70 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 
 	oldWinnerPts, oldLoserPts := winner.Points, loser.Points
 
-	// Puntos por RANGO (FT 3, partidas equitativas): las divisiones I/II/III
-	// no importan, solo el rango. Vencer a un rango superior da más puntos;
-	// caer ante uno inferior cuesta más. Se recalculan AQUÍ, con los rangos
-	// reales al terminar el set (el stake de la reta era solo estimado).
-	stake := ranks.WinPoints(winner.Points, loser.Points)
-	// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
-	// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
-	// perfecto sin ceder games. Mismas reglas que la liquidación web.
-	stake += ranks.StreakBonus(winner.Streak)
-	winScore, loseScore := m.Score1, m.Score2
-	if winScore < loseScore {
-		winScore, loseScore = loseScore, winScore
+	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus LP
+	// suben/bajan con deltas FIJOS de clasificación y el neto de esos 5 sets
+	// decide el rango inicial. El rival ya clasificado cobra con las reglas
+	// normales (el clasificante cuenta con el nivel de sus puntos actuales).
+	winnerPlacing := winner.Wins+winner.Losses < ranks.PlacementGames
+	loserPlacing := loser.Wins+loser.Losses < ranks.PlacementGames
+
+	var stake, penalty int
+	if winnerPlacing {
+		stake = ranks.PlacementWin
+	} else {
+		// Puntos por RANGO (FT 3, partidas equitativas): las divisiones I/II/III
+		// no importan, solo el rango. Vencer a un rango superior da más puntos;
+		// caer ante uno inferior cuesta más. Se recalculan AQUÍ, con los rangos
+		// reales al terminar el set (el stake de la reta era solo estimado).
+		stake = ranks.WinPoints(winner.Points, loser.Points)
+		// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
+		// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
+		// perfecto sin ceder games. Mismas reglas que la liquidación web.
+		stake += ranks.StreakBonus(winner.Streak)
+		winScore, loseScore := m.Score1, m.Score2
+		if winScore < loseScore {
+			winScore, loseScore = loseScore, winScore
+		}
+		if ranks.IsFlawless(winScore, loseScore, m.TargetFT) {
+			stake += ranks.FlawlessBonus
+		}
 	}
-	if ranks.IsFlawless(winScore, loseScore, m.TargetFT) {
-		stake += ranks.FlawlessBonus
+	if loserPlacing {
+		penalty = ranks.PlacementLoss
+	} else {
+		penalty = ranks.LosePoints(winner.Points, loser.Points)
 	}
-	penalty := ranks.LosePoints(winner.Points, loser.Points)
 
 	loserNew := loser.Points - penalty
-	if loserNew < ranks.MinPointsFloor {
-		loserNew = ranks.MinPointsFloor
-	}
-	if loserNew > loser.Points { // perder nunca sube los puntos
-		loserNew = loser.Points
-	}
-	// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
-	// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
-	if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
-		if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
-			loserNew = floor
+	if loserPlacing {
+		// Piso de la clasificación: con 0V-5D se aterriza en Plata II y no se
+		// baja más por perder en clasificación.
+		if loserNew < ranks.PlacementFloor {
+			loserNew = ranks.PlacementFloor
 		}
-		loser.DemotionShield = false
+	} else {
+		if loserNew < ranks.MinPointsFloor {
+			loserNew = ranks.MinPointsFloor
+		}
+		if loserNew > loser.Points { // perder nunca sube los puntos
+			loserNew = loser.Points
+		}
+		// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
+		// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
+		if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
+			if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
+				loserNew = floor
+			}
+			loser.DemotionShield = false
+		}
 	}
 
 	m.PointsAtStake = stake
 	m.WinnerDelta = stake
 	m.LoserDelta = loserNew - loser.Points
 
-	// Ascender de división (re)otorga el escudo anti-descenso.
-	if ranks.DivisionIndexOf(winner.Points+stake) > ranks.DivisionIndexOf(winner.Points) {
+	// Ascender de división (re)otorga el escudo anti-descenso (ya clasificado).
+	if !winnerPlacing && ranks.DivisionIndexOf(winner.Points+stake) > ranks.DivisionIndexOf(winner.Points) {
 		winner.DemotionShield = true
 	}
 	winner.Points += stake
@@ -1721,6 +1748,10 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 	loser.Points = loserNew
 	loser.Losses++
 	loser.Streak = 0
+
+	// ¿Cerró su clasificación en este set? (llegó a sus 5 primeros sets)
+	report.PlacedW = winnerPlacing && winner.Wins+winner.Losses == ranks.PlacementGames
+	report.PlacedL = loserPlacing && loser.Wins+loser.Losses == ranks.PlacementGames
 
 	// Mantiene actualizados nombre y avatar de Discord.
 	if tag, avatar := sideInfo(m, winner.DiscordID); tag != "" {
@@ -1995,6 +2026,14 @@ func sendMatchmakingReport(s *discordgo.Session, r matchReport) {
 	desc += "\n" + fmt.Sprintf("😎 **WINS** · **%s** %s pts → **%d** · %s\n😵 **LOSES** · %s %s pts → **%d** · %s",
 		r.WinnerTag, signed(r.WinnerDelta), r.WinnerPoints, rankLine(r.OldRankW, r.NewRankW),
 		r.LoserTag, signed(r.LoserDelta), r.LoserPoints, rankLine(r.OldRankL, r.NewRankL))
+	if r.PlacedW || r.PlacedL {
+		if r.PlacedW {
+			desc += fmt.Sprintf("\n🏅 **CLASIFICÓ** · **%s** terminó sus 5 partidas de clasificación y queda en **%s**", r.WinnerTag, ranks.FromPoints(r.WinnerPoints).DisplayName)
+		}
+		if r.PlacedL {
+			desc += fmt.Sprintf("\n🏅 **CLASIFICÓ** · **%s** terminó sus 5 partidas de clasificación y queda en **%s**", r.LoserTag, ranks.FromPoints(r.LoserPoints).DisplayName)
+		}
+	}
 
 	wTag, wAvatar := sideInfo(&m, m.WinnerDiscordID)
 	embed := &discordgo.MessageEmbed{
