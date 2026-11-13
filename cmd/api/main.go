@@ -100,7 +100,63 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 		players[i].Ranking = i + 1
 	}
 
+	// 🧩 Equipo principal del perfil como respaldo: cuando Start.gg no reportó
+	// los mains, la sync guarda el placeholder "2XKO_FIGHTER" en players. En la
+	// web se muestra en su lugar el equipo principal que el jugador eligió en
+	// su perfil (users.main_char1/main_char2, unidos por discord_id). Los
+	// equipos reales (reportados o puestos a mano en la BD) no se tocan.
+	applyProfileMains(players)
+
 	json.NewEncoder(w).Encode(players)
+}
+
+// isPlaceholderTeam: el equipo que la sync guarda cuando Start.gg no reportó
+// los mains del jugador (o viene vacío). No es un equipo real de la web.
+func isPlaceholderTeam(character string) bool {
+	c := strings.ToUpper(strings.TrimSpace(character))
+	return c == "" || c == "2XKO_FIGHTER"
+}
+
+// applyProfileMains reemplaza el placeholder "2XKO_FIGHTER" por el equipo
+// principal del perfil del jugador (tabla users). Si el jugador no tiene
+// mains guardados (no inició sesión o no armó equipo), conserva el placeholder.
+func applyProfileMains(players []models.Player) {
+	ids := make([]string, 0, len(players))
+	for _, p := range players {
+		if p.DiscordID != "" && isPlaceholderTeam(p.Character) {
+			ids = append(ids, p.DiscordID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	var users []models.User
+	if err := db.Select("discord_id, main_char1, main_char2").
+		Where("discord_id IN ?", ids).Find(&users).Error; err != nil {
+		log.Println("⚠️ Rankings: no se pudieron leer los equipos principales:", err)
+		return
+	}
+
+	mains := make(map[string][2]string, len(users))
+	for _, u := range users {
+		mains[u.DiscordID] = [2]string{u.MainChar1, u.MainChar2}
+	}
+
+	for i := range players {
+		if !isPlaceholderTeam(players[i].Character) {
+			continue
+		}
+		m, ok := mains[players[i].DiscordID]
+		if !ok || m[0] == "" || m[1] == "" {
+			continue
+		}
+		c1, c2 := gamechars.CharacterName(m[0]), gamechars.CharacterName(m[1])
+		if c1 == "" || c2 == "" {
+			continue
+		}
+		players[i].Character = c1 + ", " + c2
+	}
 }
 
 // HandleGetMatchmakingRankings es el manejador HTTP del ranking de MATCHMAKING (/api/rankings/matchmaking).
