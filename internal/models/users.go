@@ -11,6 +11,9 @@ type User struct {
 	GlobalName    string    `json:"globalName"`    // nombre visible global
 	GuildNickname string    `json:"guildNickname"` // apodo dentro del servidor
 	AvatarURL     string    `json:"avatarUrl"`
+	// Nacionalidad del jugador (ISO 3166-1 alpha-2, la elige en la web;
+	// la bandera se muestra en el perfil y en el matchmaking).
+	Country       string    `json:"country"`
 	Roles         string    `json:"roles"` // IDs de roles separados por coma
 	// Equipo principal (mains) elegido en la web: los 2 personajes y la fusión.
 	MainChar1     string    `json:"mainChar1"` // Personaje 1 (point)

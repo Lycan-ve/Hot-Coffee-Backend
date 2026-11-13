@@ -209,6 +209,7 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 		"discordId": discordID,
 		"tag":       tag,
 		"avatarUrl": avatar,
+		"country":   auth.CountryOf(discordID),
 		"points":    points + ranks.BasePoints,
 		"rank":      ranks.InfoFor(points, mp.Wins+mp.Losses),
 		"wins":      mp.Wins,

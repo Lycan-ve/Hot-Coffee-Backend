@@ -546,6 +546,7 @@ type publicUser struct {
 	GlobalName    string `json:"globalName"`
 	GuildNickname string `json:"guildNickname"`
 	AvatarURL     string `json:"avatarUrl"`
+	Country       string `json:"country"`
 }
 
 func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) {
@@ -622,6 +623,7 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			GlobalName:    user.GlobalName,
 			GuildNickname: user.GuildNickname,
 			AvatarURL:     user.AvatarURL,
+			Country:       user.Country,
 		},
 		"stats": map[string]any{
 			"points":             ranks.BasePoints + mmEarned,
@@ -744,6 +746,7 @@ func RegisterRoutes(database *gorm.DB) {
 	http.HandleFunc("/api/auth/discord/callback", handleCallback)
 	http.HandleFunc("/api/auth/me", handleMe)
 	http.HandleFunc("/api/auth/mains", handleMains)
+	http.HandleFunc("/api/auth/country", handleCountry)
 	http.HandleFunc("/api/users/profile/", handlePublicProfile)
 	fmt.Println("✅ Rutas de autenticación y perfiles registradas.")
 }
