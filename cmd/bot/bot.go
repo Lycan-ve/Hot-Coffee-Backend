@@ -95,6 +95,11 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 	// 3. Ejecuta torneos configurados de forma manual (id > 900000)
 	startgg.SyncManualTournaments(db, activeMembers)
 
+	// 3.5 🌍 Nacionalidades: completa el país/estado desde la ubicación
+	//     pública del perfil de Start.gg de quienes aún no tienen bandera
+	//     (tope por pasada para respetar el rate limit de la API).
+	startgg.BackfillUserLocations(db, startGGToken, 40)
+
 	// 4. Reconstruye el ranking desde el historial de torneos: garantiza que
 	//    los puntos del ranking coincidan exactamente con la suma de los
 	//    torneos que muestra el perfil web y repara dobles sumas históricas.
@@ -160,7 +165,7 @@ func startHealthServer() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
-	log.Printf("❤️ Health server activo en el puerto %s (monitorea esta URL con UptimeRobot)", port)
+	log.Printf("❤️ Health server activo en el puerto %s (monitorea esta URL con UptimeRobot)", srvPort())
 	srv := &http.Server{
 		Addr:              ":" + port,
 		ReadHeaderTimeout:  5 * time.Second,
@@ -170,6 +175,8 @@ func startHealthServer() {
 	}
 	log.Fatal(srv.ListenAndServe())
 }
+
+func srvPort() string { return os.Getenv("PORT") }
 
 func main() {
 	// Carga las variables del archivo .env si se ejecuta localmente

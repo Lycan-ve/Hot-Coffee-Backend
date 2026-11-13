@@ -205,7 +205,7 @@ func gqlDo(client *http.Client, token, query string, vars map[string]interface{}
 		resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr := fmt.Errorf("HTTP %d", resp.StatusCode)
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			time.Sleep(time.Duration(attempt) * 5 * time.Second)
 			continue
 		}
