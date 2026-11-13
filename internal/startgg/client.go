@@ -108,6 +108,11 @@ type standingNode struct {
 						URL  string `json:"url"`
 					} `json:"images"`
 					Authorizations []startggAuth `json:"authorizations"`
+					// 🌍 Ubicación pública del perfil: nacionalidad del jugador.
+					Location *struct {
+						Country string `json:"country"`
+						State   string `json:"state"`
+					} `json:"location"`
 				} `json:"user"`
 			} `json:"player"`
 		} `json:"participants"`
@@ -155,6 +160,7 @@ query EventStandings($eventId: ID!, $page: Int!, $perPage: Int!) {
                 user {
                 slug
                 images { type url }
+                location { country state } # 🌍 Nacionalidad del jugador
                 authorizations(types: [DISCORD]) { externalId externalUsername }
               }
             }
@@ -199,7 +205,7 @@ func gqlDo(client *http.Client, token, query string, vars map[string]interface{}
 		resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			lastErr := fmt.Errorf("HTTP %d", resp.StatusCode)
 			time.Sleep(time.Duration(attempt) * 5 * time.Second)
 			continue
 		}
@@ -580,6 +586,13 @@ func applyStandings(tx *gorm.DB, eventID int, nodes []standingNode, activeDiscor
 			if discordUserID == "" {
 				log.Printf("   ⏭️ Omitiendo %s (puesto %d, start.gg id %d): %s.", gamerTag, node.Placement, originalID, reason)
 				continue
+			}
+
+			// 🌍 Nacionalidad desde Start.gg: país y estado de la ubicación
+			// pública del perfil (se guardan en users para el perfil web
+			// y las banderas del matchmaking).
+			if user.Location != nil {
+				SaveUserLocation(tx, discordUserID, user.Location.Country, user.Location.State)
 			}
 
 			if err := recordTournamentPlacement(tx, playerID, discordUserID, gamerTag, eventID, node.Placement, earnedPoints); err != nil {
