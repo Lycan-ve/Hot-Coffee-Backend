@@ -198,24 +198,23 @@ func playerPoints(discordID string) int {
 
 // playerCard arma la ficha de un jugador para el VS de la propuesta.
 // Incluye récord y racha (de matchmaking_players) para dar contexto del rival.
+// Nadie parte con rango: sin los 5 sets de clasificación completados el
+// display es "SIN RANGO" (sin emblema ni LP).
 func playerCard(discordID, tag, avatar string, points int) map[string]any {
-	card := map[string]any{
+	var mp models.MatchmakingPlayer
+	if err := db.Where("discord_id = ?", discordID).First(&mp).Error; err != nil {
+		mp = models.MatchmakingPlayer{}
+	}
+	return map[string]any{
 		"discordId": discordID,
 		"tag":       tag,
 		"avatarUrl": avatar,
 		"points":    points + ranks.BasePoints,
-		"rank":      ranks.FromPoints(points),
-		"wins":      0,
-		"losses":    0,
-		"streak":    0,
+		"rank":      ranks.InfoFor(points, mp.Wins+mp.Losses),
+		"wins":      mp.Wins,
+		"losses":    mp.Losses,
+		"streak":    mp.Streak,
 	}
-	var mp models.MatchmakingPlayer
-	if err := db.Where("discord_id = ?", discordID).First(&mp).Error; err == nil {
-		card["wins"] = mp.Wins
-		card["losses"] = mp.Losses
-		card["streak"] = mp.Streak
-	}
-	return card
 }
 
 func threadURL(threadID string) string {
@@ -743,7 +742,6 @@ func handleDecline(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
-
 
 // ---------------------------------------------------------------------------
 // POST /api/matchmaking/rematch — revancha directa tras un set

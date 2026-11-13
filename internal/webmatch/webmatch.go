@@ -238,12 +238,10 @@ func playerGames(discordID string) int {
 	return 0
 }
 
-// playerRank: rango para la sala. Sin las 5 partidas de clasificación
-// completadas no hay rango: Placed=false y la web muestra "Clasificando".
+// playerRank: rango para la sala. Nadie parte con rango: sin los 5 sets de
+// clasificación completados el display es "SIN RANGO" (sin emblema ni LP).
 func playerRank(pointsWon, games int) ranks.Info {
-	info := ranks.FromPoints(pointsWon)
-	info.Placed = games >= ranks.PlacementGames
-	return info
+	return ranks.InfoFor(pointsWon, games)
 }
 
 func roundHistory(m *models.Matchmaking) []int {
@@ -1397,4 +1395,3 @@ func sweep() {
 		db.Where("match_id IN ?", oldIDs).Delete(&models.MatchmakingMessage{})
 	}
 }
-

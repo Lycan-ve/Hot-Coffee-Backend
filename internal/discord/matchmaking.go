@@ -1912,6 +1912,39 @@ func getGameKeyboard(matchID uint, p1Tag, p2Tag string) []discordgo.MessageCompo
 			discordgo.Button{
 				Label:    "📋 Resultado final",
 				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("ft_fullset_%d", matchID),
+			},
+			discordgo.Button{
+				Label:    "🏳️ Cerrar set",
+				Style:    discordgo.DangerButton,
+				CustomID: fmt.Sprintf("ft_close_%d", matchID),
+			},
+		}},
+	}
+}
+
+// getCloseKeyboard: botones de la propuesta de "Cerrar set"
+// (✅ Aceptar cierre / ▶️ Seguir jugando).
+func getCloseKeyboard(matchID uint) []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{
+				Label:    "✅ Aceptar cierre",
+				Style:    discordgo.SuccessButton,
+				CustomID: fmt.Sprintf("ft_acceptclose_%d", matchID),
+			},
+			discordgo.Button{
+				Label:    "▶️ Seguir jugando",
+				Style:    discordgo.SecondaryButton,
+				CustomID: fmt.Sprintf("ft_declineclose_%d", matchID),
+			},
+		}},
+	}
+}
+
+// historyBlock: historial game a game del set para los embeds de cierre.
+func historyBlock(m *models.Matchmaking) string {
+	var hist []int
 	if b := []byte(m.RoundHistory); len(b) > 0 {
 		if err := json.Unmarshal(b, &hist); err != nil {
 			hist = nil
@@ -1951,6 +1984,32 @@ func fullSetPanelContent(m models.Matchmaking) string {
 	}
 	return fmt.Sprintf("📋 **RESULTADO FINAL** — FT %d\n%s: **%s** · %s: **%s**\nElige los games de cada jugador (0 a %d); el set cierra con los dos.",
 		m.TargetFT, m.Player1Tag, p1, m.Player2Tag, p2, m.TargetFT)
+}
+
+// getFullSetKeyboard: los 2 dropdowns del resultado final (0 a FT games cada uno).
+func getFullSetKeyboard(m models.Matchmaking) []discordgo.MessageComponent {
+	scoreOpts := make([]discordgo.SelectMenuOption, 0, m.TargetFT+1)
+	for i := 0; i <= m.TargetFT; i++ {
+		scoreOpts = append(scoreOpts, discordgo.SelectMenuOption{
+			Label: strconv.Itoa(i),
+			Value: strconv.Itoa(i),
+		})
+	}
+	one := 1
+	row := func(customID, placeholder string) discordgo.ActionsRow {
+		return discordgo.ActionsRow{Components: []discordgo.MessageComponent{discordgo.SelectMenu{
+			MenuType:    discordgo.StringSelectMenu,
+			CustomID:    customID,
+			Placeholder: placeholder,
+			MinValues:   &one,
+			MaxValues:   one,
+			Options:     scoreOpts,
+		}}}
+	}
+	return []discordgo.MessageComponent{
+		row(fmt.Sprintf("ft_fs1_%d", m.ID), "1️⃣ Games de "+m.Player1Tag),
+		row(fmt.Sprintf("ft_fs2_%d", m.ID), "2️⃣ Games de "+m.Player2Tag),
+	}
 }
 
 // publishFinished muestra el resultado del set terminado y limpia el hilo.
@@ -2247,3 +2306,4 @@ func archiveFallback(s *discordgo.Session, threadID string) {
 	}
 	log.Printf("🗂️ Hilo %s archivado (el bloqueo requiere 'Gestionar hilos').\n", threadID)
 }
+
