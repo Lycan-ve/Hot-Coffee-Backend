@@ -116,7 +116,6 @@ func fetchGuildMember(token, guildID string) (*discordMember, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotFound {
 		return nil, nil // no es miembro del servidor
 	}
@@ -528,13 +527,12 @@ func getProfileTournaments(discordID string) []profileTournament {
 	return tournaments
 }
 
-// profileRank: rango del jugador para el perfil. Sin las 5 partidas de
-// clasificación completadas no hay rango: Placed=false y la web muestra
-// "Clasificando (n/5)".
+// profileRank: rango del jugador para el perfil. Nadie parte con rango:
+// sin las 5 partidas de clasificación completadas el display es "SIN RANGO"
+// (sin emblema ni LP) mientras el jugador define su rango inicial con los
+// 5 sets de clasificación.
 func profileRank(mp models.MatchmakingPlayer) ranks.Info {
-	info := ranks.FromPoints(mp.Points)
-	info.Placed = mp.Wins+mp.Losses >= ranks.PlacementGames
-	return info
+	return ranks.InfoFor(mp.Points, mp.Wins+mp.Losses)
 }
 
 // writeProfile arma el perfil completo (identidad, stats, rango e historial).
@@ -625,9 +623,9 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			AvatarURL:     user.AvatarURL,
 		},
 		"stats": map[string]any{
-			"points":          ranks.BasePoints + mmEarned,
-			"wins":            mp.Wins,
-			"losses":          mp.Losses,
+			"points":             ranks.BasePoints + mmEarned,
+			"wins":               mp.Wins,
+			"losses":             mp.Losses,
 			"rankingPosition":    position,
 			"tournamentPoints":   tournamentPoints,
 			"tournamentPosition": tournamentPosition,
