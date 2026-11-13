@@ -116,6 +116,7 @@ func fetchGuildMember(token, guildID string) (*discordMember, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotFound {
 		return nil, nil // no es miembro del servidor
 	}
@@ -746,3 +747,4 @@ func RegisterRoutes(database *gorm.DB) {
 	http.HandleFunc("/api/users/profile/", handlePublicProfile)
 	fmt.Println("✅ Rutas de autenticación y perfiles registradas.")
 }
+
