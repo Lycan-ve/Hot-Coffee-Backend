@@ -303,6 +303,8 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 	// Los puntos se leen DESPUES del intercambio p1/p2: antes quedaban
 	// cruzados cuando quien consultaba era el P2 (rango y puntos del rival).
 	mePts, oppPts := playerPoints(meID), playerPoints(oppID)
+	meCountry, meState := auth.LocationOf(meID)
+	oppCountry, oppState := auth.LocationOf(oppID)
 	return map[string]any{
 		"id":            m.ID,
 		"ft":            m.TargetFT,
@@ -314,7 +316,8 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 			"discordId": meID,
 			"tag":       meTag,
 			"avatarUrl": meAvatar,
-			"country":   auth.CountryOf(meID),
+			"country":   meCountry,
+			"state":     meState,
 			"points":    mePts + ranks.BasePoints,
 			"rank":      playerRank(mePts, playerGames(meID)),
 			"score":     myScore,
@@ -324,7 +327,8 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 			"discordId": oppID,
 			"tag":       oppTag,
 			"avatarUrl": oppAvatar,
-			"country":   auth.CountryOf(oppID),
+			"country":   oppCountry,
+			"state":     oppState,
 			"points":    oppPts + ranks.BasePoints,
 			"rank":      playerRank(oppPts, playerGames(oppID)),
 			"score":     oppScore,

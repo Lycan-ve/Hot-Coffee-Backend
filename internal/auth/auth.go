@@ -547,6 +547,8 @@ type publicUser struct {
 	GuildNickname string `json:"guildNickname"`
 	AvatarURL     string `json:"avatarUrl"`
 	Country       string `json:"country"`
+	State         string `json:"state,omitempty"`
+	CountrySource string `json:"countrySource,omitempty"`
 }
 
 func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) {
@@ -624,6 +626,8 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			GuildNickname: user.GuildNickname,
 			AvatarURL:     user.AvatarURL,
 			Country:       user.Country,
+			State:         user.State,
+			CountrySource: user.CountrySource,
 		},
 		"stats": map[string]any{
 			"points":             ranks.BasePoints + mmEarned,

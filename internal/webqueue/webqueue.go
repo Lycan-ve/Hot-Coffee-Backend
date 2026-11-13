@@ -205,11 +205,13 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 	if err := db.Where("discord_id = ?", discordID).First(&mp).Error; err != nil {
 		mp = models.MatchmakingPlayer{}
 	}
+	country, state := auth.LocationOf(discordID)
 	return map[string]any{
 		"discordId": discordID,
 		"tag":       tag,
 		"avatarUrl": avatar,
-		"country":   auth.CountryOf(discordID),
+		"country":   country,
+		"state":     state,
 		"points":    points + ranks.BasePoints,
 		"rank":      ranks.InfoFor(points, mp.Wins+mp.Losses),
 		"wins":      mp.Wins,

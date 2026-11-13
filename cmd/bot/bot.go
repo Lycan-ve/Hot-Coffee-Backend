@@ -165,7 +165,7 @@ func startHealthServer() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
-	log.Printf("❤️ Health server activo en el puerto %s (monitorea esta URL con UptimeRobot)", srvPort())
+	log.Printf("❤️ Health server activo en el puerto %s (monitorea esta URL con UptimeRobot)", port)
 	srv := &http.Server{
 		Addr:              ":" + port,
 		ReadHeaderTimeout:  5 * time.Second,
@@ -176,7 +176,6 @@ func startHealthServer() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func srvPort() string { return os.Getenv("PORT") }
 
 func main() {
 	// Carga las variables del archivo .env si se ejecuta localmente
