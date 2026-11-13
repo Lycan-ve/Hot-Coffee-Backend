@@ -16,6 +16,11 @@ type Player struct {
 	// API para pintar la bandera junto al nombre en los rankings.
 	Country string `gorm:"-" json:"country,omitempty"`
 	State   string `gorm:"-" json:"state,omitempty"`
+	// Fusión del equipo principal del perfil (tabla users): ID para el ícono
+	// (/Fusion/file_<id>V.png) y nombre visible. Se rellenan al servir la
+	// API, junto a Country/State.
+	Fuse     string `gorm:"-" json:"fuse,omitempty"`
+	FuseName string `gorm:"-" json:"fuseName,omitempty"`
 }
 
 type TournamentRecord struct {
