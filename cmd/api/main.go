@@ -106,6 +106,8 @@ func HandleGetRankings(w http.ResponseWriter, r *http.Request, league string) {
 	// su perfil (users.main_char1/main_char2, unidos por discord_id). Los
 	// equipos reales (reportados o puestos a mano en la BD) no se tocan.
 	applyProfileMains(players)
+	// 🌍 Nacionalidad (bandera junto al nombre): se lee de users por discord_id.
+	applyProfileLocations(players)
 
 	json.NewEncoder(w).Encode(players)
 }
@@ -159,6 +161,45 @@ func applyProfileMains(players []models.Player) {
 	}
 }
 
+// locationMap lee la nacionalidad (users.country / users.state) de los IDs de
+// Discord dados. La sync de Start.gg mantiene esos campos al día; la elección
+// manual hecha en la web también termina ahí.
+func locationMap(ids []string) map[string][2]string {
+	locs := make(map[string][2]string, len(ids))
+	if len(ids) == 0 {
+		return locs
+	}
+	var users []models.User
+	if err := db.Select("discord_id, country, state").
+		Where("discord_id IN ?", ids).Find(&users).Error; err != nil {
+		log.Println("⚠️ Rankings: no se pudo leer la nacionalidad:", err)
+		return locs
+	}
+	for _, u := range users {
+		locs[u.DiscordID] = [2]string{u.Country, u.State}
+	}
+	return locs
+}
+
+// applyProfileLocations rellena la nacionalidad de cada jugador del ranking de
+// torneos (models.Player.Country/State no se guardan en la tabla players: se
+// resuelven contra users por discord_id al servir la API).
+func applyProfileLocations(players []models.Player) {
+	ids := make([]string, 0, len(players))
+	for _, p := range players {
+		if p.DiscordID != "" {
+			ids = append(ids, p.DiscordID)
+		}
+	}
+	locs := locationMap(ids)
+	for i := range players {
+		if l, ok := locs[players[i].DiscordID]; ok {
+			players[i].Country = l[0]
+			players[i].State = l[1]
+		}
+	}
+}
+
 // HandleGetMatchmakingRankings es el manejador HTTP del ranking de MATCHMAKING (/api/rankings/matchmaking).
 // Es independiente del ranking de torneos: lee la tabla matchmaking_players, no players.
 func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +224,20 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 		// Clasificación: sets jugados y si ya obtuvo rango (5 sets).
 		players[i].Games = players[i].Wins + players[i].Losses
 		players[i].Placed = players[i].Games >= ranks.PlacementGames
+	}
+
+	// 🌍 Nacionalidad (bandera junto al nombre en la web): vive en users y la
+	// sync de Start.gg la mantiene al día. Se rellena al servir la respuesta.
+	ids := make([]string, 0, len(players))
+	for _, p := range players {
+		ids = append(ids, p.DiscordID)
+	}
+	locs := locationMap(ids)
+	for i := range players {
+		if l, ok := locs[players[i].DiscordID]; ok {
+			players[i].Country = l[0]
+			players[i].State = l[1]
+		}
 	}
 
 	json.NewEncoder(w).Encode(players)

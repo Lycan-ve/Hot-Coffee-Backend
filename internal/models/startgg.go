@@ -11,6 +11,11 @@ type Player struct {
 	DiscordID  string `json:"discordId"`  // 🆕 ID de Discord indexado del usuario
 	Points     int    `json:"points"`
 	Ranking    int    `json:"ranking" gorm:"-"`
+	// Nacionalidad del jugador (país ISO + estado/provincia): vive en la tabla
+	// users (la sync de Start.gg la mantiene al día) y se rellena al servir la
+	// API para pintar la bandera junto al nombre en los rankings.
+	Country string `gorm:"-" json:"country,omitempty"`
+	State   string `gorm:"-" json:"state,omitempty"`
 }
 
 type TournamentRecord struct {

@@ -88,4 +88,8 @@ type MatchmakingPlayer struct {
 	// y si ya completó las 5 partidas de clasificación (tiene rango).
 	Games  int  `gorm:"-" json:"games"`
 	Placed bool `gorm:"-" json:"placed"`
+	// Nacionalidad (país + estado) leída de users al servir la API; no se
+	// guarda en matchmaking_players.
+	Country string `gorm:"-" json:"country,omitempty"`
+	State   string `gorm:"-" json:"state,omitempty"`
 }
