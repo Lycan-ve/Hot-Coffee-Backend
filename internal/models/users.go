@@ -11,9 +11,12 @@ type User struct {
 	GlobalName    string    `json:"globalName"`    // nombre visible global
 	GuildNickname string    `json:"guildNickname"` // apodo dentro del servidor
 	AvatarURL     string    `json:"avatarUrl"`
-	// Nacionalidad del jugador (ISO 3166-1 alpha-2, la elige en la web;
-	// la bandera se muestra en el perfil y en el matchmaking).
-	Country       string    `json:"country"`
+	// Nacionalidad del jugador. La toma la sync de Start.gg (ubicación
+	// pública del perfil de Start.gg); también puede elegirse a mano en la
+	// web como respaldo. La bandera se muestra en el perfil y en matchmaking.
+	Country       string    `json:"country"`       // ISO 3166-1 alpha-2 (p. ej. VE)
+	State         string    `json:"state"`         // ISO 3166-2 sin prefijo (p. ej. "A" en VE, "CA" en US)
+	CountrySource string    `json:"countrySource"` // "startgg" (automática) o "manual" (elegida en la web)
 	Roles         string    `json:"roles"` // IDs de roles separados por coma
 	// Equipo principal (mains) elegido en la web: los 2 personajes y la fusión.
 	MainChar1     string    `json:"mainChar1"` // Personaje 1 (point)

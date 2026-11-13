@@ -10,9 +10,9 @@ import (
 	"smash-backend/internal/models"
 )
 
-// countries lista los países disponibles para la bandera de nacionalidad
-// (ISO 3166-1 alpha-2). La liga vive en el continente americano, pero se
-// acepta el resto del mundo para no dejar fuera a nadie de la comunidad.
+// countries lista los países disponibles para elegir la nacionalidad a mano
+// (ISO 3166-1 alpha-2). La nacionalidad normal la toma la sync de Start.gg;
+// esta lista es el respaldo para quien no tiene ubicación en Start.gg.
 var countries = map[string]string{
 	"AG": "Antigua y Barbuda", "AR": "Argentina", "BS": "Bahamas",
 	"BB": "Barbados", "BZ": "Belice", "BO": "Bolivia", "BR": "Brasil",
@@ -37,18 +37,28 @@ func ValidCountry(code string) bool {
 	return ok
 }
 
-// CountryOf devuelve el código de país del usuario ("" si nunca lo eligió).
-// Lo usan webqueue y webmatch para pintar la bandera en el matchmaking.
-func CountryOf(discordID string) string {
+// LocationOf devuelve (país, estado) del usuario ("" si nunca los tuvo).
+// País: ISO 3166-1 alpha-2. Estado: ISO 3166-2 sin el prefijo del país
+// (p. ej. "A" en Venezuela, "CA" en Estados Unidos). Lo usan webqueue y
+// webmatch para pintar las banderas del matchmaking.
+func LocationOf(discordID string) (string, string) {
 	var u models.User
-	if err := db.Where("discord_id = ?", discordID).First(&u).Error; err == nil {
-		return strings.ToUpper(strings.TrimSpace(u.Country))
+	if err := db.Select("country, state").Where("discord_id = ?", discordID).First(&u).Error; err == nil {
+		return strings.ToUpper(strings.TrimSpace(u.Country)), strings.ToUpper(strings.TrimSpace(u.State))
 	}
-	return ""
+	return "", ""
+}
+
+// CountryOf devuelve el código de país del usuario ("" si nunca lo tuvo).
+func CountryOf(discordID string) string {
+	c, _ := LocationOf(discordID)
+	return c
 }
 
 // handleCountry: GET/POST /api/auth/country — nacionalidad del jugador.
-// POST acepta {"country":"VE"} ("" la quita); GET devuelve la actual.
+// Normalmente la toma la sync de Start.gg (ubicación del perfil); POST
+// permite elegirla a mano como respaldo: {"country":"VE"} ("" la quita).
+// GET devuelve {"country", "state", "source"} con lo que haya guardado.
 func handleCountry(w http.ResponseWriter, r *http.Request) {
 	if setCors(w, r) {
 		return
@@ -92,6 +102,15 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		user.Country = code
+		// La elección manual no tiene estado/región y se marca como tal para
+		// que la web sepa que puede ofrecer cambiarla. Vaciar el país borra
+		// también la marca (la sync de Start.gg volverá a llenarla).
+		user.State = ""
+		if code == "" {
+			user.CountrySource = ""
+		} else {
+			user.CountrySource = "manual"
+		}
 		if err := db.Save(&user).Error; err != nil {
 			log.Println("❌ Country: error guardando el país:", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -102,5 +121,9 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"country": strings.ToUpper(strings.TrimSpace(user.Country))})
+	json.NewEncoder(w).Encode(map[string]any{
+		"country": strings.ToUpper(strings.TrimSpace(user.Country)),
+		"state":   strings.ToUpper(strings.TrimSpace(user.State)),
+		"source":  user.CountrySource,
+	})
 }
