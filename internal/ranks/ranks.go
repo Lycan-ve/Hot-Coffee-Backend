@@ -42,7 +42,7 @@ var Ladder = []RankDef{
 
 // Colors: los mismos colores que usan los overlays.
 var Colors = map[string]string{
-	"Iron": "#c8c8c8", "Bronze": "#e8a065", "Silver": "#c0d5cc",
+	"Aspirant": "#b0a89e", "Iron": "#c8c8c8", "Bronze": "#e8a065", "Silver": "#c0d5cc",
 	"Gold": "#f5d060", "Platinum": "#78d8f0", "Emerald": "#60e090",
 	"Diamond": "#90b8ff", "Master": "#d080f8", "Grandmaster": "#f07070",
 	"Challenger": "#ffe787",
