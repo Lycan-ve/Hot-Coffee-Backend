@@ -5,7 +5,7 @@ package ranks
 // rango inicial; mientras tanto el display NO muestra ninguna división
 // (ni Gold I ni ninguna otra), aunque los puntos ganados ya se usen por
 // debajo para emparejar y liquidar.
-const UnrankedLabel = "SIN RANGO"
+const UnrankedLabel = "Aspirant"
 
 // unrankedColor: gris neutro para un jugador sin rango.
 const unrankedColor = "#9a9a9a"

@@ -12,6 +12,7 @@ const BasePoints = 1000
 
 // Índices dentro de la escalera de los rangos sin tier.
 const (
+	AspirantIndex   = 0  // Aspirant
 	GMIndex         = 24 // Grandmaster a los 2.500 puntos totales
 	ChallengerIndex = 25 // Challenger a los 2.600 puntos totales
 )
@@ -26,6 +27,7 @@ type RankDef struct {
 // Ladder completa: el índice i se alcanza con (i+1)*100 puntos totales.
 // Iron I = 100 pts, Gold I = 1.000 pts, Grandmaster = 2.500, Challenger = 2.600.
 var Ladder = []RankDef{
+	{"Aspirant", ""},
 	{"Iron", "I"}, {"Iron", "II"}, {"Iron", "III"},
 	{"Bronze", "I"}, {"Bronze", "II"}, {"Bronze", "III"},
 	{"Silver", "I"}, {"Silver", "II"}, {"Silver", "III"},
