@@ -24,6 +24,7 @@ var seriesTable = []seriesDef{
 	{Key: "tns", Name: "TNS", Match: "tns"},
 	{Key: "tacos-tuesday", Name: "Tacos Tuesday", Match: "taco"},
 	{Key: "paragon", Name: "Paragon", Match: "paragon"},
+	{Key: "chilling-jump", Name: "Weekly Chilling Jump", Match: "chilling"},
 }
 
 // seriesOf devuelve (key, nombre corto) de la serie de un torneo según su
