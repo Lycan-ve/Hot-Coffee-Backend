@@ -90,6 +90,10 @@ func runFullSync(startGGToken string, db *gorm.DB, dgSession *discordgo.Session)
 		messages = append(messages, discord.FetchTournamentMessagesFromChannel(dgSession, id)...)
 	}
 	tournaments := startgg.ExtractTournamentsAndImages(messages)
+	// Torneos externos configurados por slug en torneos_manuales.json
+	// (campo "StartggSlug"): no se publican en los canales de Discord, pero
+	// se procesan por el mismo camino en vivo (eventos, standings, imágenes).
+	tournaments = append(tournaments, startgg.ManualSlugTournaments()...)
 	startgg.SyncTournamentsFromDiscordLive(tournaments, startGGToken, db, activeMembers)
 
 	// 3. Ejecuta torneos configurados de forma manual (id > 900000)

@@ -22,6 +22,14 @@ type ManualTournament struct {
 	Slug      string
 	Name      string
 	Standings []ManualStanding
+
+	// StartggSlug: slug de un torneo externo de Start.gg (no publicado en los
+	// canales de Discord de la liga). Con este campo el bot procesa el torneo
+	// por el mismo camino en vivo que los publicados en Discord: baja sus
+	// eventos de 2XKO terminados, sus standings completos, imágenes y
+	// nacionalidades, y valida a los jugadores contra el servidor.
+	// Con StartggSlug configurado se ignoran EventID/Standings.
+	StartggSlug string
 }
 
 func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
@@ -31,6 +39,12 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 	}
 
 	for _, t := range manualTournaments {
+		if t.StartggSlug != "" {
+			// Los torneos externos por slug los procesa la sync en vivo
+			// (los recoge ManualSlugTournaments); aquí no se tocan.
+			continue
+		}
+
 		var already int64
 		db.Model(&ProcessedEvent{}).Where("event_id = ?", t.EventID).Count(&already)
 		if already > 0 {
@@ -128,6 +142,26 @@ func SyncManualTournaments(db *gorm.DB, activeMembers map[string]string) {
 			log.Printf("✅ Torneo Manual %s indexado correctamente.", t.Name)
 		}
 	}
+}
+
+// ManualSlugTournaments devuelve los slugs de Start.gg configurados en
+// torneos_manuales.json (campo "StartggSlug"): torneos externos que no se
+// publican en los canales de Discord de la liga. El bot los añade a la cola
+// de la sync en vivo (SyncTournamentsFromDiscordLive), que baja sus eventos,
+// standings, imágenes y nacionalidades exactamente igual que con los torneos
+// publicados en Discord.
+func ManualSlugTournaments() []TournamentInfo {
+	var out []TournamentInfo
+	seen := make(map[string]bool)
+	for _, t := range loadManualTournaments() {
+		slug := strings.TrimSpace(t.StartggSlug)
+		if slug == "" || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		out = append(out, TournamentInfo{Slug: slug})
+	}
+	return out
 }
 
 // loadManualTournaments lee los torneos manuales desde torneos_manuales.json
