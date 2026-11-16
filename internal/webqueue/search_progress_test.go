@@ -69,7 +69,7 @@ func TestQueueSearchProgressForPhases(t *testing.T) {
 					break
 				}
 			}
-			got := queueSearchProgressFor(entry, tt.entries, tt.streaks, now)
+			got := queueSearchProgressFor(entry, tt.entries, tt.streaks, nil, now)
 			if got.Phase != tt.wantPhase {
 				t.Fatalf("phase = %q, want %q", got.Phase, tt.wantPhase)
 			}
@@ -80,6 +80,21 @@ func TestQueueSearchProgressForPhases(t *testing.T) {
 				t.Fatalf("message = %q, want %q", got.Message, tt.wantText)
 			}
 		})
+	}
+}
+
+func TestQueueSearchProgressDoesNotAdvertiseBlockedRematch(t *testing.T) {
+	now := time.Now().UTC()
+	entry := models.MatchmakingQueue{DiscordID: "self", Points: 0, JoinedAt: now.Add(-10 * time.Second)}
+	peer := models.MatchmakingQueue{DiscordID: "peer", Points: 0, JoinedAt: now.Add(-5 * time.Second)}
+	rematches := map[string]bool{"peer|self": true}
+
+	got := queueSearchProgressFor(entry, []models.MatchmakingQueue{entry, peer}, nil, rematches, now)
+	if got.Phase != searchPhaseMeasuring {
+		t.Fatalf("phase = %q, want %q", got.Phase, searchPhaseMeasuring)
+	}
+	if got.CandidateCount != 0 {
+		t.Fatalf("candidate count = %d, want 0", got.CandidateCount)
 	}
 }
 
