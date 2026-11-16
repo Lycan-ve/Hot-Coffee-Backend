@@ -57,6 +57,98 @@ const (
 // Estados de reta que cuentan como "set activo" (no puedes hacer cola).
 var activeMatchStatuses = []string{"PENDING", "IN_PROGRESS", "PENDING_VERIFY", "PENDING_CLOSE"}
 
+// Estados de progreso de la búsqueda. Los mensajes se calculan en el backend
+// a partir del estado real de la cola, no mediante un carrusel del frontend.
+const (
+	searchPhaseAnalyzing = "analyzing"
+	searchPhaseMeasuring = "measuring"
+	searchPhaseContacting = "contacting"
+	searchPhasePreparing = "preparing"
+)
+
+type queueSearchProgress struct {
+	Phase           string    `json:"phase"`
+	Message         string    `json:"message"`
+	CandidateCount  int       `json:"candidateCount"`
+	ElapsedSeconds  int64     `json:"elapsedSeconds"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+func newQueueSearchProgress(phase string, candidates int, elapsed time.Duration, now time.Time) queueSearchProgress {
+	message := "ANALIZANDO TU RANGO…"
+	switch phase {
+	case searchPhaseMeasuring:
+		message = "MIDIENDO EL NIVEL DE LA COLA…"
+	case searchPhaseContacting:
+		message = "CONTACTANDO RIVALES CERCANOS…"
+	case searchPhasePreparing:
+		message = "PREPARANDO EL ESCENARIO…"
+	}
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return queueSearchProgress{
+		Phase:          phase,
+		Message:        message,
+		CandidateCount: candidates,
+		ElapsedSeconds: int64(elapsed.Seconds()),
+		UpdatedAt:      now.UTC(),
+	}
+}
+
+// queueSearchProgressFor deriva la fase a partir de los jugadores que esperan
+// realmente y de las mismas reglas de rango que usa tryMatch. Un candidato es
+// un jugador con quien ya se permitiría emparejar según rango, racha y espera.
+func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.MatchmakingQueue, streaks map[string]int, rematches map[string]bool, now time.Time) queueSearchProgress {
+	peerCount := 0
+	candidateCount := 0
+	for _, peer := range entries {
+		if peer.DiscordID == entry.DiscordID {
+			continue
+		}
+		peerCount++
+
+		// tryMatch evalúa las parejas en orden de antigüedad. Usa el tiempo
+		// de espera del jugador que llegó primero, también para las ventanas
+		// de ampliación de rango.
+		firstJoinedAt := entry.JoinedAt
+		if peer.JoinedAt.Before(firstJoinedAt) ||
+			(peer.JoinedAt.Equal(firstJoinedAt) && peer.DiscordID < entry.DiscordID) {
+			firstJoinedAt = peer.JoinedAt
+		}
+		waited := now.Sub(firstJoinedAt)
+		if waited < 0 {
+			waited = 0
+		}
+		if !canPairByRank(entry, peer, streaks, waited) {
+			continue
+		}
+		// Respeta el anti-revancha que usa tryMatch. Solo mostramos un
+		// candidato si el emparejador también podría seleccionarlo ahora.
+		a, b := entry.DiscordID, peer.DiscordID
+		if a > b {
+			a, b = b, a
+		}
+		isRecentRematch := rematches[a+"|"+b]
+		if isRecentRematch &&
+			now.Sub(entry.JoinedAt) < rematchFallbackAfter &&
+			now.Sub(peer.JoinedAt) < rematchFallbackAfter {
+			continue
+		}
+		candidateCount++
+	}
+
+	phase := searchPhaseAnalyzing
+	if peerCount > 0 {
+		phase = searchPhaseMeasuring
+	}
+	if candidateCount > 0 {
+		phase = searchPhaseContacting
+	}
+	return newQueueSearchProgress(phase, candidateCount, now.Sub(entry.JoinedAt), now)
+}
+
+
 var db *gorm.DB
 
 // RegisterRoutes registra la API de la cola y arranca el sweeper de fondo.
@@ -508,8 +600,9 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Heartbeat: "sigo con la pestaña abierta".
+	now := time.Now()
 	db.Model(&models.MatchmakingQueue{}).Where("discord_id = ?", discordID).
-		Update("last_seen", time.Now())
+		Update("last_seen", now)
 
 	// El emparejamiento y las expiraciones las maneja el sweeper de fondo
 	// (cada 10 s): ejecutarlas en cada poll de cada cliente saturaba el pool
@@ -553,6 +646,9 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		if p.Status == proposalConfirmed {
 			status = "confirmed"
 		}
+		// La pantalla mantiene la transición mínima del frontend, pero el
+		// texto de esta fase lo determina la propuesta ya creada en el backend.
+		resp["search"] = newQueueSearchProgress(searchPhasePreparing, 0, now.Sub(p.CreatedAt), now)
 		resp["status"] = status
 		resp["proposal"] = map[string]any{
 			"id":                 p.ID,
@@ -568,22 +664,54 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2) En cola: buscando rival.
-	var entry models.MatchmakingQueue
-	if err := db.Where("discord_id = ?", discordID).First(&entry).Error; err == nil {
-		var qc int64
-		db.Model(&models.MatchmakingQueue{}).Count(&qc)
+	// 2) En cola: buscando rival. Leemos la cola una sola vez para obtener
+	// tanto el total de jugadores como los candidatos compatibles por rango.
+	var entries []models.MatchmakingQueue
+	if err := db.Order("joined_at ASC, discord_id ASC").Find(&entries).Error; err != nil {
+		writeErr(w, http.StatusInternalServerError, "bd", "error interno")
+		return
+	}
+	var entry *models.MatchmakingQueue
+	ids := make([]string, 0, len(entries))
+	for i := range entries {
+		ids = append(ids, entries[i].DiscordID)
+		if entries[i].DiscordID == discordID {
+			entry = &entries[i]
+		}
+	}
+	if entry != nil {
+		// La racha habilita buscar un rival de un rango superior. Cargamos
+		// solo ese dato para usar exactamente las reglas de tryMatch.
+		streaks := make(map[string]int, len(ids))
+		if len(ids) > 0 {
+			var players []models.MatchmakingPlayer
+			if err := db.Select("discord_id", "streak").Where("discord_id IN ?", ids).Find(&players).Error; err != nil {
+				log.Printf("⚠️ WebQueue: no se pudieron leer las rachas para el estado de búsqueda: %v", err)
+			} else {
+				for _, player := range players {
+					streaks[player.DiscordID] = player.Streak
+				}
+			}
+		}
+
+		elapsed := now.Sub(entry.JoinedAt)
+		rematchWindowForQueue := rematchWindow
+		if len(entries) <= smallQueuePlayers {
+			rematchWindowForQueue = rematchWindowSmallQueue
+		}
+		rematches := recentOpponents(db, ids, rematchWindowForQueue)
 		resp["status"] = "searching"
+		resp["search"] = queueSearchProgressFor(*entry, entries, streaks, rematches, now)
 		resp["queue"] = map[string]any{
 			"ft":      entry.TargetFT,
 			"since":   entry.JoinedAt,
-			"players": qc,
+			"players": len(entries),
 			// Informativo para el frontend viejo: ±100 pts ≈ un rango.
 			// El emparejamiento real es por RANGO (no por puntos).
 			"radius": 100,
 			// true cuando ya se aceptan rangos adyacentes (la búsqueda se
 			// amplió por tiempo de espera); el frontend puede mostrarlo.
-			"wide": time.Since(entry.JoinedAt) >= adjacentTierAfter,
+			"wide": elapsed >= adjacentTierAfter,
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return
