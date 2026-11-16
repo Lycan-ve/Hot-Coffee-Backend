@@ -99,7 +99,7 @@ func newQueueSearchProgress(phase string, candidates int, elapsed time.Duration,
 // queueSearchProgressFor deriva la fase a partir de los jugadores que esperan
 // realmente y de las mismas reglas de rango que usa tryMatch. Un candidato es
 // un jugador con quien ya se permitiría emparejar según rango, racha y espera.
-func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.MatchmakingQueue, streaks map[string]int, now time.Time) queueSearchProgress {
+func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.MatchmakingQueue, streaks map[string]int, rematches map[string]bool, now time.Time) queueSearchProgress {
 	peerCount := 0
 	candidateCount := 0
 	for _, peer := range entries {
@@ -120,9 +120,22 @@ func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.Matc
 		if waited < 0 {
 			waited = 0
 		}
-		if canPairByRank(entry, peer, streaks, waited) {
-			candidateCount++
+		if !canPairByRank(entry, peer, streaks, waited) {
+			continue
 		}
+		// Respeta el anti-revancha que usa tryMatch. Solo mostramos un
+		// candidato si el emparejador también podría seleccionarlo ahora.
+		a, b := entry.DiscordID, peer.DiscordID
+		if a > b {
+			a, b = b, a
+		}
+		isRecentRematch := rematches[a+"|"+b]
+		if isRecentRematch &&
+			now.Sub(entry.JoinedAt) < rematchFallbackAfter &&
+			now.Sub(peer.JoinedAt) < rematchFallbackAfter {
+			continue
+		}
+		candidateCount++
 	}
 
 	phase := searchPhaseAnalyzing
@@ -682,8 +695,13 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		}
 
 		elapsed := now.Sub(entry.JoinedAt)
+		rematchWindowForQueue := rematchWindow
+		if len(entries) <= smallQueuePlayers {
+			rematchWindowForQueue = rematchWindowSmallQueue
+		}
+		rematches := recentOpponents(db, ids, rematchWindowForQueue)
 		resp["status"] = "searching"
-		resp["search"] = queueSearchProgressFor(*entry, entries, streaks, now)
+		resp["search"] = queueSearchProgressFor(*entry, entries, streaks, rematches, now)
 		resp["queue"] = map[string]any{
 			"ft":      entry.TargetFT,
 			"since":   entry.JoinedAt,
