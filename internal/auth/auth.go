@@ -588,18 +588,27 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 	var mp models.MatchmakingPlayer
 	mpFound := db.Where("discord_id = ?", discordID).First(&mp).Error == nil
 
-	// El ranking de matchmaking parte de Gold I (1.000 pts): los puntos
-	// mostrados son el total (base + ganados); los ganados se guardan desde 0.
+	// LP y rangos visuales siguen independientes de la habilidad Glicko-2.
 	mmEarned := mp.Points
+	glicko := ranks.DefaultGlicko2Rating()
+	if mpFound {
+		glicko = ranks.Glicko2Rating{
+			Rating: mp.GlickoRating, RD: mp.GlickoRD,
+			Volatility: mp.GlickoVolatility, LastRatedAt: mp.GlickoLastRatedAt,
+		}
+		if glicko.Rating == 0 {
+			glicko = ranks.DefaultGlicko2Rating()
+		}
+	}
 	if mmEarned < 0 {
 		mmEarned = 0
 	}
 
-	// Posición en la tabla (cuántos jugadores tienen más puntos + 1).
+	// Posición en el ranking de habilidad Glicko-2 (mayor rating = mejor posición).
 	position := 0
 	if mpFound {
 		var ahead int64
-		db.Model(&models.MatchmakingPlayer{}).Where("points > ?", mp.Points).Count(&ahead)
+		db.Model(&models.MatchmakingPlayer{}).Where("glicko_rating > ?", glicko.Rating).Count(&ahead)
 		position = int(ahead) + 1
 	}
 
@@ -638,6 +647,12 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			"tournamentPosition": tournamentPosition,
 		},
 		"rank":  profileRank(mp),
+		"glicko": map[string]any{
+			"rating":     glicko.Rating,
+			"rd":         glicko.RD,
+			"volatility": glicko.Volatility,
+			"ratedAt":    glicko.LastRatedAt,
+		},
 		"mains": makeProfileTeam(user.MainChar1, user.MainChar2, user.MainFuse),
 	}
 	// Estado de Discord en vivo (lo escribe el bot desde el Gateway).
