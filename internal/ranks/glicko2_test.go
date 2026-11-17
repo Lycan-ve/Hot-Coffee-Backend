@@ -45,8 +45,8 @@ func TestGlicko2PairMovesRatingsInOppositeDirections(t *testing.T) {
 }
 
 func TestGlicko2ExpectedScoreIsSymmetric(t *testing.T) {
-	a := Glicko2Rating{Rating: 1700, RD: 80, Volatility: 0.06}
-	b := Glicko2Rating{Rating: 1400, RD: 120, Volatility: 0.06}
+	a := Glicko2Rating{Rating: 1700, RD: 100, Volatility: 0.06}
+	b := Glicko2Rating{Rating: 1400, RD: 100, Volatility: 0.06}
 	ab := Glicko2ExpectedScore(a, b)
 	ba := Glicko2ExpectedScore(b, a)
 	assertNear(t, "complementary expected score", ab+ba, 1, 1e-12)
