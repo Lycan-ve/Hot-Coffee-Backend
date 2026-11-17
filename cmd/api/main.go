@@ -165,9 +165,8 @@ func applyProfileMains(players []models.Player) {
 	}
 }
 
-// locationMap lee la nacionalidad (users.country / users.state) de los IDs de
-// Discord dados. La sync de Start.gg mantiene esos campos al día; la elección
-// manual hecha en la web también termina ahí.
+// locationMap lee solo nacionalidades que el propio jugador ya confirmó.
+// Las sugerencias de Start.gg se muestran únicamente en su perfil privado.
 func locationMap(ids []string) map[string][2]string {
 	locs := make(map[string][2]string, len(ids))
 	if len(ids) == 0 {
@@ -175,7 +174,7 @@ func locationMap(ids []string) map[string][2]string {
 	}
 	var users []models.User
 	if err := db.Select("discord_id, country, state").
-		Where("discord_id IN ?", ids).Find(&users).Error; err != nil {
+		Where("discord_id IN ? AND country_confirmed = ?", ids, true).Find(&users).Error; err != nil {
 		log.Println("⚠️ Rankings: no se pudo leer la nacionalidad:", err)
 		return locs
 	}
