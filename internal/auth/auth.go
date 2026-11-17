@@ -600,6 +600,7 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			glicko = ranks.DefaultGlicko2Rating()
 		}
 	}
+	glicko = ranks.Glicko2At(glicko, time.Now())
 	if mmEarned < 0 {
 		mmEarned = 0
 	}
