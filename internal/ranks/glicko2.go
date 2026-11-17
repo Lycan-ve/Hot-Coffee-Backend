@@ -6,7 +6,8 @@ import (
 )
 
 // Glicko-2 usa la escala original de Glickman (1500, RD 350).
-// Cada set confirmado constituye un periodo de rating en el sistema online.
+// Cada set confirmado constituye un periodo online. Para inactividad, la
+// desviación se amplía por periodos semanales sin resultados confirmados.
 const (
 	Glicko2DefaultRating     = 1500.0
 	Glicko2DefaultRD         = 350.0
@@ -15,7 +16,8 @@ const (
 	glicko2Scale   = 173.7178
 	glicko2Tau     = 0.5
 	glicko2Epsilon = 0.000001
-	glicko2Pi      = math.Pi
+	glicko2Pi              = math.Pi
+	Glicko2InactivityPeriod = 7 * 24 * time.Hour
 )
 
 // Glicko2Rating contiene la habilidad estimada, la incertidumbre y la
@@ -73,6 +75,28 @@ func logistic(x float64) float64 {
 	return z / (1 + z)
 }
 
+// Glicko2At devuelve la estimación efectiva en un instante dado. Durante
+// semanas sin resultados, la RD crece según la volatilidad; el rating central
+// no cambia. El resultado se persiste al liquidar el siguiente set.
+func Glicko2At(r Glicko2Rating, now time.Time) Glicko2Rating {
+	r = normalizeGlicko2(r)
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if r.LastRatedAt == nil || r.LastRatedAt.IsZero() {
+		return r
+	}
+	elapsed := now.Sub(*r.LastRatedAt)
+	if elapsed < Glicko2InactivityPeriod {
+		return r
+	}
+	periods := int(elapsed / Glicko2InactivityPeriod)
+	phi := r.RD / glicko2Scale
+	phi = math.Sqrt(phi*phi + float64(periods)*r.Volatility*r.Volatility)
+	r.RD = math.Min(Glicko2DefaultRD, phi*glicko2Scale)
+	return r
+}
+
 // Glicko2ExpectedScore devuelve la probabilidad esperada de que a venza a b,
 // utilizando el rating y RD del rival tal como define Glicko-2.
 func Glicko2ExpectedScore(a, b Glicko2Rating) float64 {
@@ -116,7 +140,7 @@ func UpdateGlicko2Pair(a, b Glicko2Rating, scoreA float64, now time.Time) (Glick
 // UpdateGlicko2 aplica un periodo de rating a un jugador. Los resultados de
 // un periodo se calculan todos contra ratings/RD de inicio del mismo periodo.
 func UpdateGlicko2(player Glicko2Rating, opponents []Glicko2Opponent, now time.Time) Glicko2Rating {
-	player = normalizeGlicko2(player)
+	player = Glicko2At(player, now)
 	if len(opponents) == 0 {
 		return player
 	}
@@ -135,11 +159,11 @@ func UpdateGlicko2(player Glicko2Rating, opponents []Glicko2Opponent, now time.T
 		if opponent.Score < 0 || opponent.Score > 1 {
 			continue
 		}
-		opponentRating := normalizeGlicko2(Glicko2Rating{
+		opponentRating := Glicko2At(Glicko2Rating{
 			Rating: opponent.Rating,
 			RD:     opponent.RD,
 			Volatility: Glicko2DefaultVolatility,
-		})
+		}, now)
 		opponentMu := (opponentRating.Rating - Glicko2DefaultRating) / glicko2Scale
 		opponentPhi := opponentRating.RD / glicko2Scale
 		g := glicko2G(opponentPhi)
