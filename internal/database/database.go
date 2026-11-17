@@ -71,6 +71,15 @@ func Connect() *gorm.DB {
 		log.Fatal("❌ Error inicializando el ranking Glicko-2:", err)
 	}
 
+	// Compatibilidad con los usuarios que ya habían elegido su país a mano
+	// antes de añadir la confirmación explícita: esa acción ya expresaba
+	// consentimiento y no deben volver a pasar por el aviso.
+	if err := db.Model(&models.User{}).
+		Where("country_source = ? AND country <> '' AND country_confirmed = ?", "manual", false).
+		Update("country_confirmed", true).Error; err != nil {
+		log.Fatal("❌ Error migrando las nacionalidades manuales confirmadas:", err)
+	}
+
 	log.Println("✅ Base de datos conectada y migrada correctamente.")
 	return db
 }
