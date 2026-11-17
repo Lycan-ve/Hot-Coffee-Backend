@@ -45,6 +45,7 @@ func Connect() *gorm.DB {
 		&models.MatchmakingQueue{},    // 🆕 cola web de matchmaking
 		&models.MatchmakingProposal{}, // 🆕 emparejamientos de la cola web
 		&models.MatchmakingMessage{},  // 🆕 chat del set web
+		&models.Glicko2Migration{},    // migraciones de datos de Glicko-2
 	); err != nil {
 		log.Fatal("❌ Error en la migración automática:", err)
 	}
@@ -64,6 +65,10 @@ func Connect() *gorm.DB {
 			Update(field.column, field.value).Error; err != nil {
 			log.Fatal("❌ Error inicializando ", field.column, " de Glicko-2:", err)
 		}
+	}
+
+	if err := seedGlicko2History(db); err != nil {
+		log.Fatal("❌ Error inicializando el ranking Glicko-2:", err)
 	}
 
 	log.Println("✅ Base de datos conectada y migrada correctamente.")
