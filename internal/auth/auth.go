@@ -530,7 +530,7 @@ func getProfileTournaments(discordID string) []profileTournament {
 
 // profileRank: rango del jugador para el perfil. Nadie parte con rango:
 // sin las 5 partidas de clasificación completadas el display es "SIN RANGO"
-// (sin emblema ni LP) mientras el jugador define su rango inicial con los
+// (sin emblema ni RP) mientras el jugador define su rango inicial con los
 // 5 sets de clasificación.
 func profileRank(mp models.MatchmakingPlayer) ranks.Info {
 	return ranks.InfoFor(mp.Points, mp.Wins+mp.Losses)
