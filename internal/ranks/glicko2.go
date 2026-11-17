@@ -133,10 +133,8 @@ func UpdateGlicko2Pair(a, b Glicko2Rating, scoreA float64, now time.Time) (Glick
 	if now.IsZero() {
 		now = time.Now()
 	}
-	// Ajusta ambas RD por inactividad antes de calcular; los dos cálculos reciben
-	// los mismos datos previos al set y no se contaminan entre sí.
-	a = Glicko2At(a, now)
-	b = Glicko2At(b, now)
+	// UpdateGlicko2 aplica inactividad al jugador y al rival una sola vez.
+	// Ambos cálculos reciben los ratings pre-set, sin contaminarse entre sí.
 	nextA := UpdateGlicko2(a, []Glicko2Opponent{{
 		Rating: b.Rating, RD: b.RD, Volatility: b.Volatility,
 		LastRatedAt: b.LastRatedAt, Score: scoreA,
