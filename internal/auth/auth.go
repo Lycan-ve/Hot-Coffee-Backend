@@ -589,7 +589,7 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 	var mp models.MatchmakingPlayer
 	mpFound := db.Where("discord_id = ?", discordID).First(&mp).Error == nil
 
-	// LP y rangos visuales siguen independientes de la habilidad Glicko-2.
+	// RP y rangos visuales siguen independientes de la habilidad Glicko-2.
 	mmEarned := mp.Points
 	glicko := ranks.DefaultGlicko2Rating()
 	if mpFound {
@@ -642,7 +642,7 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			CountryConfirmed: user.CountryConfirmed,
 		},
 		"stats": map[string]any{
-			"points":             ranks.BasePoints + mmEarned,
+			"points":             mmEarned,
 			"wins":               mp.Wins,
 			"losses":             mp.Losses,
 			"rankingPosition":    position,
