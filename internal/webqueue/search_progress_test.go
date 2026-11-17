@@ -7,8 +7,8 @@ import (
 	"smash-backend/internal/models"
 )
 
-func TestQueueSearchProgressForPhases(t *testing.T) {
-	now := time.Date(2026, time.November, 16, 12, 0, 0, 0, time.UTC)
+func TestQueueSearchProgressForGlickoPhases(t *testing.T) {
+	now := time.Date(2026, time.November, 17, 12, 0, 0, 0, time.UTC)
 	self := models.MatchmakingQueue{
 		DiscordID: "self",
 		Points:    0,
@@ -16,43 +16,55 @@ func TestQueueSearchProgressForPhases(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		entries    []models.MatchmakingQueue
-		streaks    map[string]int
-		wantPhase  string
-		wantCount  int
-		wantText   string
+		name          string
+		entries       []models.MatchmakingQueue
+		playerRatings map[string]models.MatchmakingPlayer
+		wantPhase     string
+		wantCount     int
+		wantText      string
 	}{
 		{
 			name:      "no rivals",
 			entries:   []models.MatchmakingQueue{self},
 			wantPhase: searchPhaseAnalyzing,
-			wantText:  "ANALIZANDO TU RANGO…",
+			wantText:  "ANALIZANDO TU RATING…",
 		},
 		{
-			name: "players in queue but ranks are not compatible yet",
+			name: "player outside current Glicko window",
 			entries: []models.MatchmakingQueue{
 				self,
-				{DiscordID: "far-rank", Points: 600, JoinedAt: now.Add(-5 * time.Second)},
+				{DiscordID: "far-rating", JoinedAt: now.Add(-5 * time.Second)},
+			},
+			playerRatings: map[string]models.MatchmakingPlayer{
+				"self":      {DiscordID: "self", GlickoRating: 1500, GlickoRD: 40, GlickoVolatility: 0.06},
+				"far-rating": {DiscordID: "far-rating", GlickoRating: 2300, GlickoRD: 40, GlickoVolatility: 0.06},
 			},
 			wantPhase: searchPhaseMeasuring,
 			wantText:  "MIDIENDO EL NIVEL DE LA COLA…",
 		},
 		{
-			name: "compatible rival",
+			name: "similar Glicko rating and overlapping uncertainty",
 			entries: []models.MatchmakingQueue{
 				self,
-				{DiscordID: "same-rank", Points: 0, JoinedAt: now.Add(-5 * time.Second)},
+				{DiscordID: "near-rating", JoinedAt: now.Add(-5 * time.Second)},
+			},
+			playerRatings: map[string]models.MatchmakingPlayer{
+				"self":        {DiscordID: "self", GlickoRating: 1500, GlickoRD: 100, GlickoVolatility: 0.06},
+				"near-rating": {DiscordID: "near-rating", GlickoRating: 1600, GlickoRD: 100, GlickoVolatility: 0.06},
 			},
 			wantPhase: searchPhaseContacting,
 			wantCount: 1,
 			wantText:  "CONTACTANDO RIVALES CERCANOS…",
 		},
 		{
-			name: "adjacent rank becomes eligible after waiting threshold",
+			name: "Glicko window expands after waiting",
 			entries: []models.MatchmakingQueue{
-				{DiscordID: "self", Points: 0, JoinedAt: now.Add(-3 * time.Minute)},
-				{DiscordID: "adjacent-rank", Points: 100, JoinedAt: now.Add(-3 * time.Minute)},
+				{DiscordID: "self", JoinedAt: now.Add(-3 * time.Minute)},
+				{DiscordID: "wider-rating", JoinedAt: now.Add(-3 * time.Minute)},
+			},
+			playerRatings: map[string]models.MatchmakingPlayer{
+				"self":         {DiscordID: "self", GlickoRating: 1500, GlickoRD: 100, GlickoVolatility: 0.06},
+				"wider-rating": {DiscordID: "wider-rating", GlickoRating: 1770, GlickoRD: 100, GlickoVolatility: 0.06},
 			},
 			wantPhase: searchPhaseContacting,
 			wantCount: 1,
@@ -69,7 +81,7 @@ func TestQueueSearchProgressForPhases(t *testing.T) {
 					break
 				}
 			}
-			got := queueSearchProgressFor(entry, tt.entries, tt.streaks, nil, now)
+			got := queueSearchProgressFor(entry, tt.entries, tt.playerRatings, nil, now)
 			if got.Phase != tt.wantPhase {
 				t.Fatalf("phase = %q, want %q", got.Phase, tt.wantPhase)
 			}
@@ -83,13 +95,33 @@ func TestQueueSearchProgressForPhases(t *testing.T) {
 	}
 }
 
+func TestCanPairByGlickoUsesCombinedRDAndWaitExpansion(t *testing.T) {
+	a := models.MatchmakingQueue{DiscordID: "a"}
+	b := models.MatchmakingQueue{DiscordID: "b"}
+	ratings := map[string]models.MatchmakingPlayer{
+		"a": {DiscordID: "a", GlickoRating: 1500, GlickoRD: 100, GlickoVolatility: 0.06},
+		"b": {DiscordID: "b", GlickoRating: 1770, GlickoRD: 100, GlickoVolatility: 0.06},
+	}
+
+	if canPairByGlicko(a, b, ratings, 10*time.Second) {
+		t.Fatal("players should not pair inside the narrow initial window")
+	}
+	if !canPairByGlicko(a, b, ratings, 3*time.Minute) {
+		t.Fatal("players should pair after the Glicko window expands")
+	}
+}
+
 func TestQueueSearchProgressDoesNotAdvertiseBlockedRematch(t *testing.T) {
 	now := time.Now().UTC()
-	entry := models.MatchmakingQueue{DiscordID: "self", Points: 0, JoinedAt: now.Add(-10 * time.Second)}
-	peer := models.MatchmakingQueue{DiscordID: "peer", Points: 0, JoinedAt: now.Add(-5 * time.Second)}
+	entry := models.MatchmakingQueue{DiscordID: "self", JoinedAt: now.Add(-10 * time.Second)}
+	peer := models.MatchmakingQueue{DiscordID: "peer", JoinedAt: now.Add(-5 * time.Second)}
 	rematches := map[string]bool{"peer|self": true}
+	ratings := map[string]models.MatchmakingPlayer{
+		"self": {DiscordID: "self", GlickoRating: 1500, GlickoRD: 100, GlickoVolatility: 0.06},
+		"peer": {DiscordID: "peer", GlickoRating: 1500, GlickoRD: 100, GlickoVolatility: 0.06},
+	}
 
-	got := queueSearchProgressFor(entry, []models.MatchmakingQueue{entry, peer}, nil, rematches, now)
+	got := queueSearchProgressFor(entry, []models.MatchmakingQueue{entry, peer}, ratings, rematches, now)
 	if got.Phase != searchPhaseMeasuring {
 		t.Fatalf("phase = %q, want %q", got.Phase, searchPhaseMeasuring)
 	}
