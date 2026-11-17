@@ -43,7 +43,7 @@ func ValidCountry(code string) bool {
 // webmatch para pintar las banderas del matchmaking.
 func LocationOf(discordID string) (string, string) {
 	var u models.User
-	if err := db.Select("country, state").Where("discord_id = ?", discordID).First(&u).Error; err == nil {
+	if err := db.Select("country, state").Where("discord_id = ? AND country_confirmed = ?", discordID, true).First(&u).Error; err == nil {
 		return strings.ToUpper(strings.TrimSpace(u.Country)), strings.ToUpper(strings.TrimSpace(u.State))
 	}
 	return "", ""
