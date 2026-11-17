@@ -44,6 +44,22 @@ func TestGlicko2PairMovesRatingsInOppositeDirections(t *testing.T) {
 	}
 }
 
+func TestGlicko2PairAppliesInactivityOnlyOnce(t *testing.T) {
+	now := time.Date(2026, time.November, 17, 12, 0, 0, 0, time.UTC)
+	lastRated := now.Add(-3 * Glicko2InactivityPeriod)
+	a := Glicko2Rating{Rating: 1600, RD: 100, Volatility: 0.06, LastRatedAt: &lastRated}
+	b := Glicko2Rating{Rating: 1500, RD: 120, Volatility: 0.06, LastRatedAt: &lastRated}
+
+	gotA, _ := UpdateGlicko2Pair(a, b, 1, now)
+	wantA := UpdateGlicko2(a, []Glicko2Opponent{{
+		Rating: b.Rating, RD: b.RD, Volatility: b.Volatility,
+		LastRatedAt: b.LastRatedAt, Score: 1,
+	}}, now)
+	assertNear(t, "pair rating", gotA.Rating, wantA.Rating, 1e-10)
+	assertNear(t, "pair RD", gotA.RD, wantA.RD, 1e-10)
+	assertNear(t, "pair volatility", gotA.Volatility, wantA.Volatility, 1e-12)
+}
+
 func TestGlicko2ExpectedScoreIsSymmetric(t *testing.T) {
 	a := Glicko2Rating{Rating: 1700, RD: 100, Volatility: 0.06}
 	b := Glicko2Rating{Rating: 1400, RD: 100, Volatility: 0.06}
