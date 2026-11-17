@@ -53,7 +53,7 @@ func Connect() *gorm.DB {
 	// antes de añadir la confirmación explícita: esa acción ya expresaba
 	// consentimiento y no deben volver a pasar por el aviso.
 	if err := db.Model(&models.User{}).
-		Where("country_source = ? AND country <> ''", "manual").
+		Where("country_source = ? AND country <> '' AND country_confirmed = ?", "manual", false).
 		Update("country_confirmed", true).Error; err != nil {
 		log.Fatal("❌ Error migrando las nacionalidades manuales confirmadas:", err)
 	}
