@@ -48,6 +48,19 @@ func Connect() *gorm.DB {
 	); err != nil {
 		log.Fatal("❌ Error en la migración automática:", err)
 	}
+	// Normaliza filas existentes creadas antes de incorporar Glicko-2. Las
+	// columnas nuevas ya tienen defaults, pero este UPDATE cubre filas donde
+	// el motor haya materializado cero en vez del default.
+	if err := db.Model(&models.MatchmakingPlayer{}).
+		Where("glicko_rating = 0 OR glicko_rd = 0 OR glicko_volatility = 0").
+		Updates(map[string]any{
+			"glicko_rating":     1500.0,
+			"glicko_rd":         350.0,
+			"glicko_volatility": 0.06,
+		}).Error; err != nil {
+		log.Fatal("❌ Error inicializando ratings Glicko-2 existentes:", err)
+	}
+
 	log.Println("✅ Base de datos conectada y migrada correctamente.")
 	return db
 }
