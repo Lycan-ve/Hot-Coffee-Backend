@@ -115,9 +115,45 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			user.CountryConfirmed = true
+			// Confirmación atómica: si Start.gg cambió el país entre la
+			// lectura del perfil y este clic, el WHERE no coincide y no se
+			// confirma una sugerencia antigua.
+			updates := map[string]any{"country_confirmed": true}
 			if user.CountrySource == "" {
-				user.CountrySource = "manual"
+				updates["country_source"] = "manual"
+			}
+			result := db.Model(&models.User{}).
+				Where("discord_id = ? AND country = ? AND country_confirmed = ?", discordID, code, false).
+				Updates(updates)
+			if result.Error != nil {
+				log.Println("❌ Country: error confirmando la nacionalidad:", result.Error)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
+				return
+			}
+			if result.RowsAffected == 0 {
+				// Repetir la confirmación del mismo país es idempotente; si el
+				// país cambió, se pide al usuario revisar la nueva sugerencia.
+				var current models.User
+				if err := db.Select("country", "state", "country_source", "country_confirmed").
+					Where("discord_id = ?", discordID).First(&current).Error; err != nil ||
+					strings.ToUpper(strings.TrimSpace(current.Country)) != code ||
+					!current.CountryConfirmed {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					json.NewEncoder(w).Encode(map[string]string{
+						"error":   "pais_actualizado",
+						"message": "La nacionalidad sugerida cambió. Actualiza tu perfil y vuelve a confirmarla.",
+					})
+					return
+				}
+				user = current
+			} else {
+				user.CountryConfirmed = true
+				if user.CountrySource == "" {
+					user.CountrySource = "manual"
+				}
 			}
 		} else {
 			if code != "" && !ValidCountry(code) {
@@ -143,12 +179,14 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 				user.CountryConfirmed = true
 			}
 		}
-		if err := db.Save(&user).Error; err != nil {
-			log.Println("❌ Country: error guardando el país:", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
-			return
+		if !body.Confirm {
+			if err := db.Save(&user).Error; err != nil {
+				log.Println("❌ Country: error guardando el país:", err)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
+				return
+			}
 		}
 	}
 
