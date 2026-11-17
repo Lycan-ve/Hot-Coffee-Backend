@@ -1,3 +1,4 @@
+
 package auth
 
 import (
@@ -550,6 +551,9 @@ type publicUser struct {
 	State         string `json:"state,omitempty"`
 	CountrySource    string `json:"countrySource,omitempty"`
 	CountryConfirmed bool   `json:"countryConfirmed"`
+	Bio             string       `json:"bio,omitempty"`
+	Platforms       []string     `json:"platforms,omitempty"`
+	Socials         []socialLink `json:"socials,omitempty"`
 }
 
 func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) {
@@ -657,6 +661,15 @@ func writeProfile(w http.ResponseWriter, discordID string, includeHistory bool) 
 			"ratedAt":    glicko.LastRatedAt,
 		},
 		"mains": makeProfileTeam(user.MainChar1, user.MainChar2, user.MainFuse),
+	}
+
+	// Preferencias del perfil (bio, plataformas y redes) normalizadas
+	// para el frontend: solo listas válidas, nunca strings internos.
+	if pu, ok := response["user"].(publicUser); ok {
+		pu.Bio = user.Bio
+		pu.Platforms = platformsOf(user.Platforms)
+		pu.Socials = socialsOf(user.Socials)
+		response["user"] = pu
 	}
 	// Estado de Discord en vivo (lo escribe el bot desde el Gateway).
 	response["presence"] = presence.Get(discordID)
@@ -769,6 +782,7 @@ func RegisterRoutes(database *gorm.DB) {
 	http.HandleFunc("/api/auth/me", handleMe)
 	http.HandleFunc("/api/auth/mains", handleMains)
 	http.HandleFunc("/api/auth/country", handleCountry)
+	http.HandleFunc("/api/auth/profile", handleProfile)
 	http.HandleFunc("/api/users/profile/", handlePublicProfile)
 	fmt.Println("✅ Rutas de autenticación y perfiles registradas.")
 }

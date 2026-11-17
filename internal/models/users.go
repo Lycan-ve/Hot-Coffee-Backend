@@ -1,3 +1,4 @@
+
 package models
 
 import "time"
@@ -18,6 +19,10 @@ type User struct {
 	State         string    `json:"state"`         // ISO 3166-2 sin prefijo (p. ej. "A" en VE, "CA" en US)
 	CountrySource    string    `json:"countrySource"` // "startgg" (origen automático) o "manual" (elección del usuario)
 	CountryConfirmed bool      `gorm:"not null;default:false" json:"countryConfirmed"` // true si el jugador confirmó explícitamente su país
+	// Preferencias visibles del perfil, editables desde la web (/api/auth/profile).
+	Bio       string `json:"bio"`       // bio corta del perfil (max 200 caracteres)
+	Platforms string `json:"platforms"` // plataformas de juego separadas por coma (PC, PS5, XBOX)
+	Socials   string `json:"socials"`   // redes sociales "red:usuario" separadas por coma
 	Roles         string    `json:"roles"` // IDs de roles separados por coma
 	// Equipo principal (mains) elegido en la web: los 2 personajes y la fusión.
 	MainChar1     string    `json:"mainChar1"` // Personaje 1 (point)
