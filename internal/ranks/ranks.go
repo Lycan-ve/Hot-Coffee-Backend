@@ -2,30 +2,22 @@ package ranks
 
 import "fmt"
 
-// LP necesarios para subir una división completa (tier).
-const LPPerDivision = 100
+// RP necesarios para avanzar una división completa.
+const RPPerDivision = 100
 
-// Todos los jugadores parten de Gold I (1.000 pts): el rango se calcula
-// sobre el TOTAL (base + puntos ganados), aunque el ranking guarde los
-// puntos ganados desde 0.
-const BasePoints = 1000
-
-// Índices dentro de la escalera de los rangos sin tier.
+// Índices dentro de la escalera. Aspirant cubre 0-99 RP; cada división
+// siguiente comienza al alcanzar el siguiente múltiplo de 100 RP.
 const (
-	AspirantIndex   = 0  // Aspirant
-	GMIndex         = 24 // Grandmaster a los 2.500 puntos totales
-	ChallengerIndex = 25 // Challenger a los 2.600 puntos totales
+	AspirantIndex   = 0
+	GMIndex         = 25 // Grandmaster desde 2.500 RP
+	ChallengerIndex = 26 // Challenger desde 2.600 RP
 )
 
-// RankDef es una división de la escalera (rango + tier).
-// Grandmaster y Challenger no tienen tier (van por RP).
 type RankDef struct {
 	Rank string
-	Tier string // "I", "II", "III" o "" para GM/Challenger
+	Tier string
 }
 
-// Ladder completa: el índice i se alcanza con (i+1)*100 puntos totales.
-// Iron I = 100 pts, Gold I = 1.000 pts, Grandmaster = 2.500, Challenger = 2.600.
 var Ladder = []RankDef{
 	{"Aspirant", ""},
 	{"Iron", "I"}, {"Iron", "II"}, {"Iron", "III"},
@@ -40,7 +32,6 @@ var Ladder = []RankDef{
 	{"Challenger", ""},
 }
 
-// Colors: los mismos colores que usan los overlays.
 var Colors = map[string]string{
 	"Aspirant": "#b0a89e", "Iron": "#c8c8c8", "Bronze": "#e8a065", "Silver": "#c0d5cc",
 	"Gold": "#f5d060", "Platinum": "#78d8f0", "Emerald": "#60e090",
@@ -50,25 +41,21 @@ var Colors = map[string]string{
 
 var tierToIdx = map[string]int{"I": 1, "II": 2, "III": 3}
 
-// Info es todo lo que el frontend necesita para pintar el rank display.
 type Info struct {
 	Rank          string  `json:"rank"`
 	Tier          string  `json:"tier"`
-	DisplayName   string  `json:"displayName"` // "Gold II"
-	IsRP          bool    `json:"isRp"`        // true para GM/Challenger
-	LP            int     `json:"lp"`          // 0-99 (rangos con tier)
-	RP            int     `json:"rp"`          // puntos totales (GM/Challenger)
-	Points        int     `json:"points"`      // total de rango (base + ganados)
-	LPToNext      int     `json:"lpToNext"`    // cuánto falta para subir
-	Next          string  `json:"next"`        // siguiente división, "" si ya es Challenger
+	DisplayName   string  `json:"displayName"`
+	IsRP          bool    `json:"isRp"` // true para GM/Challenger, que no tienen tier
+	RP            int     `json:"rp"` // total de puntos de ranking; todos parten de 0
+	Points        int     `json:"points"` // alias compatible de RP total
+	RPToNext      int     `json:"rpToNext"`
+	Next          string  `json:"next"`
 	NextIsRP      bool    `json:"nextIsRp"`
 	DivisionIndex int     `json:"divisionIndex"`
-	Progress      float64 `json:"progress"` // 0-100 % para la barra
-	IconPath      string  `json:"iconPath"` // p. ej. "Rangos/Gold_tier_2_icon.png"
+	Progress      float64 `json:"progress"`
+	IconPath      string  `json:"iconPath"`
 	Color         string  `json:"color"`
-	// Placed: false mientras el jugador cumple sus partidas de clasificación
-	// (lo marcan los llamadores: FromPoints no conoce las partidas jugadas).
-	Placed bool `json:"placed"`
+	Placed        bool    `json:"placed"`
 }
 
 func (d RankDef) displayName() string {
@@ -85,24 +72,15 @@ func iconPath(d RankDef) string {
 	return fmt.Sprintf("Rangos/%s_tier_%d_icon.png", d.Rank, tierToIdx[d.Tier])
 }
 
-// FromPoints calcula el rango actual a partir de los puntos GANADOS en el
-// ranking de matchmaking (guardados desde 0). Todos parten de Gold I:
-// el total de rango es BasePoints + puntos ganados, y cada 100 puntos
-// totales se sube una división. 1.100 = Gold II, 2.500 = Grandmaster y
-// 2.600 = Challenger. GM/Challenger muestran RP total (LP fuera de juego).
+// FromPoints calcula rango y RP directamente desde los puntos ganados.
+// No hay base oculta: 0 RP = Aspirant, 100 = Iron I, 1.000 = Gold I,
+// 2.500 = Grandmaster y 2.600 = Challenger.
 func FromPoints(points int) Info {
-	// Los puntos ganados pueden ser NEGATIVOS durante la clasificación (las
-	// derrotas de clasificación restan más de lo que suman las victorias): no
-	// se recortan a 0; el total de rango simplemente puede quedar por debajo
-	// de la base (Plata o menor).
-	total := BasePoints + points
+	total := points
 	if total < 0 {
 		total = 0
 	}
-	idx := total/LPPerDivision - 1
-	if idx < 0 {
-		idx = 0
-	}
+	idx := total / RPPerDivision
 	if idx >= len(Ladder) {
 		idx = len(Ladder) - 1
 	}
@@ -111,32 +89,29 @@ func FromPoints(points int) Info {
 		Rank:          d.Rank,
 		Tier:          d.Tier,
 		DisplayName:   d.displayName(),
+		IsRP:          idx >= GMIndex,
+		RP:            total,
 		Points:        total,
 		DivisionIndex: idx,
 		IconPath:      iconPath(d),
 		Color:         Colors[d.Rank],
-		IsRP:          idx >= GMIndex,
 	}
 
 	if info.IsRP {
-		// Grandmaster / Challenger: RP totales, sin barra de LP.
-		info.RP = total
 		info.Progress = 100
 		if idx < len(Ladder)-1 {
-			next := Ladder[idx+1]
-			info.Next = next.displayName()
-			info.LPToNext = (idx+2)*LPPerDivision - total
+			info.Next = Ladder[idx+1].displayName()
+			info.RPToNext = (idx+1)*RPPerDivision - total
+			info.NextIsRP = idx+1 >= GMIndex
 		}
 		return info
 	}
 
-	// Rangos con tier (I-III): LP 0-99 dentro de la división.
-	info.LP = total % LPPerDivision
-	info.LPToNext = LPPerDivision - info.LP
+	info.RPToNext = RPPerDivision - (total % RPPerDivision)
 	if idx+1 < len(Ladder) {
 		info.Next = Ladder[idx+1].displayName()
 		info.NextIsRP = idx+1 >= GMIndex
 	}
-	info.Progress = float64(info.LP) / float64(LPPerDivision) * 100
+	info.Progress = float64(total%RPPerDivision) / float64(RPPerDivision) * 100
 	return info
 }
