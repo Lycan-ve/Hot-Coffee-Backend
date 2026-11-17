@@ -239,7 +239,7 @@ func playerGames(discordID string) int {
 }
 
 // playerRank: rango para la sala. Nadie parte con rango: sin los 5 sets de
-// clasificación completados el display es "SIN RANGO" (sin emblema ni LP).
+// clasificación completados el display es "SIN RANGO" (sin emblema ni RP).
 func playerRank(pointsWon, games int) ranks.Info {
 	return ranks.InfoFor(pointsWon, games)
 }
@@ -1242,7 +1242,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 		return errors.New("no se encontraron los jugadores del set")
 	}
 
-	// Glicko-2 se actualiza como una métrica independiente de LP.
+	// Glicko-2 se actualiza como una métrica independiente de RP.
 	// Ambos jugadores se calculan usando los ratings/RD anteriores al set.
 	now := time.Now()
 	winnerGlicko, loserGlicko := ranks.UpdateGlicko2Pair(
@@ -1256,7 +1256,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 	loser.GlickoRating, loser.GlickoRD, loser.GlickoVolatility, loser.GlickoLastRatedAt =
 		loserGlicko.Rating, loserGlicko.RD, loserGlicko.Volatility, loserGlicko.LastRatedAt
 
-	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus LP
+	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus RP
 	// suben/bajan con deltas FIJOS de clasificación y el neto de esos 5 sets
 	// decide el rango inicial. El rival ya clasificado cobra con las reglas
 	// normales (el clasificante cuenta con el nivel de sus puntos actuales).
@@ -1271,7 +1271,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 		// no importan. Vencer a un rango superior da más puntos; caer ante uno
 		// inferior cuesta más. Se recalculan AQUÍ con los rangos reales del final.
 		stake = ranks.WinPoints(winner.Points, loser.Points)
-		// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
+		// Bonos de RP: racha caliente (la 3ª victoria seguida y las siguientes
 		// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
 		// perfecto sin ceder games. Se incluyen en WinnerDelta para que la sala
 		// muestre el RP real ganado.
