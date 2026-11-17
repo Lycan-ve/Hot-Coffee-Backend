@@ -45,8 +45,30 @@ func Connect() *gorm.DB {
 		&models.MatchmakingQueue{},    // 🆕 cola web de matchmaking
 		&models.MatchmakingProposal{}, // 🆕 emparejamientos de la cola web
 		&models.MatchmakingMessage{},  // 🆕 chat del set web
+		&models.Glicko2Migration{},    // migraciones de datos de Glicko-2
 	); err != nil {
 		log.Fatal("❌ Error en la migración automática:", err)
+	}
+	// Normaliza filas existentes creadas antes de incorporar Glicko-2. Las
+	// columnas nuevas ya tienen defaults, pero este UPDATE cubre filas donde
+	// el motor haya materializado cero en vez del default.
+	for _, field := range []struct {
+		column string
+		value  float64
+	}{
+		{column: "glicko_rating", value: 1500.0},
+		{column: "glicko_rd", value: 350.0},
+		{column: "glicko_volatility", value: 0.06},
+	} {
+		if err := db.Model(&models.MatchmakingPlayer{}).
+			Where(field.column+" = 0").
+			Update(field.column, field.value).Error; err != nil {
+			log.Fatal("❌ Error inicializando ", field.column, " de Glicko-2:", err)
+		}
+	}
+
+	if err := seedGlicko2History(db); err != nil {
+		log.Fatal("❌ Error inicializando el ranking Glicko-2:", err)
 	}
 
 	// Compatibilidad con los usuarios que ya habían elegido su país a mano

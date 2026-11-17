@@ -19,10 +19,9 @@ import (
 const (
 	matchmakingLeague = "2xko_online"
 
-	// Emparejamiento EQUITATIVO por rango: Gold I, II y III son el mismo
-	// nivel. Con racha de 3+ victorias se busca un rival de UN rango más alto.
-	// Fallback para no dejar a nadie esperando para siempre: tras 2 min se
-	// aceptan rangos adyacentes y tras 4 min, cualquiera.
+	// Emparejamiento por Glicko-2: compara rating y RD de ambos jugadores,
+	// prioriza la menor distancia normalizada y amplía la ventana por espera.
+	// Tras 4 min se permite cualquier diferencia para evitar colas bloqueadas.
 	adjacentTierAfter = 2 * time.Minute
 	anyTierAfter      = 4 * time.Minute
 
@@ -75,7 +74,7 @@ type queueSearchProgress struct {
 }
 
 func newQueueSearchProgress(phase string, candidates int, elapsed time.Duration, now time.Time) queueSearchProgress {
-	message := "ANALIZANDO TU RANGO…"
+	message := "ANALIZANDO TU RATING…"
 	switch phase {
 	case searchPhaseMeasuring:
 		message = "MIDIENDO EL NIVEL DE LA COLA…"
@@ -96,10 +95,9 @@ func newQueueSearchProgress(phase string, candidates int, elapsed time.Duration,
 	}
 }
 
-// queueSearchProgressFor deriva la fase a partir de los jugadores que esperan
-// realmente y de las mismas reglas de rango que usa tryMatch. Un candidato es
-// un jugador con quien ya se permitiría emparejar según rango, racha y espera.
-func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.MatchmakingQueue, streaks map[string]int, rematches map[string]bool, now time.Time) queueSearchProgress {
+// queueSearchProgressFor cuenta candidatos con las mismas reglas Glicko-2
+// que usa tryMatch, además de respetar el anti-rematch.
+func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.MatchmakingQueue, playerRatings map[string]models.MatchmakingPlayer, rematches map[string]bool, now time.Time) queueSearchProgress {
 	peerCount := 0
 	candidateCount := 0
 	for _, peer := range entries {
@@ -108,9 +106,6 @@ func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.Matc
 		}
 		peerCount++
 
-		// tryMatch evalúa las parejas en orden de antigüedad. Usa el tiempo
-		// de espera del jugador que llegó primero, también para las ventanas
-		// de ampliación de rango.
 		firstJoinedAt := entry.JoinedAt
 		if peer.JoinedAt.Before(firstJoinedAt) ||
 			(peer.JoinedAt.Equal(firstJoinedAt) && peer.DiscordID < entry.DiscordID) {
@@ -120,11 +115,9 @@ func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.Matc
 		if waited < 0 {
 			waited = 0
 		}
-		if !canPairByRank(entry, peer, streaks, waited) {
+		if !canPairByGlicko(entry, peer, playerRatings, waited, now) {
 			continue
 		}
-		// Respeta el anti-revancha que usa tryMatch. Solo mostramos un
-		// candidato si el emparejador también podría seleccionarlo ahora.
 		a, b := entry.DiscordID, peer.DiscordID
 		if a > b {
 			a, b = b, a
@@ -148,6 +141,56 @@ func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.Matc
 	return newQueueSearchProgress(phase, candidateCount, now.Sub(entry.JoinedAt), now)
 }
 
+// glickoStateOf adapta la fila persistida al modelo matemático. Los defaults
+// cubren perfiles de cola sin fila previa de ranking.
+func glickoStateOf(p models.MatchmakingPlayer, now time.Time) ranks.Glicko2Rating {
+	return ranks.Glicko2At(ranks.Glicko2Rating{
+		Rating:     p.GlickoRating,
+		RD:         p.GlickoRD,
+		Volatility: p.GlickoVolatility,
+		LastRatedAt: p.GlickoLastRatedAt,
+	}, now)
+}
+
+// canPairByGlicko usa la distancia de ratings en desviaciones estándar
+// combinadas. La tolerancia se amplía con la espera y mantiene el fallback
+// de 4 minutos para que una cola pequeña no se quede bloqueada.
+func canPairByGlicko(a, b models.MatchmakingQueue, playerRatings map[string]models.MatchmakingPlayer, waited time.Duration, now time.Time) bool {
+	if waited >= anyTierAfter {
+		return true
+	}
+	sigmaWindow := 1.5
+	if waited >= adjacentTierAfter {
+		sigmaWindow = 2.0
+	}
+	ra := glickoStateOf(playerRatings[a.DiscordID], now)
+	rb := glickoStateOf(playerRatings[b.DiscordID], now)
+	return ranks.Glicko2DistanceSigma(ra, rb) <= sigmaWindow
+}
+
+// recentOpponents devuelve los pares que ya se enfrentaron en una ventana
+// reciente, para conservar la rotación de rivales del matchmaking.
+func recentOpponents(tx *gorm.DB, ids []string, window time.Duration) map[string]bool {
+	pairs := map[string]bool{}
+	if len(ids) < 2 {
+		return pairs
+	}
+	var rows []models.Matchmaking
+	if err := tx.Select("player1_discord_id", "player2_discord_id").
+		Where("status = ? AND created_at > ? AND (player1_discord_id IN ? OR player2_discord_id IN ?)",
+			"FINISHED", time.Now().Add(-window), ids, ids).
+		Find(&rows).Error; err != nil {
+		return pairs
+	}
+	for _, m := range rows {
+		a, b := m.Player1DiscordID, m.Player2DiscordID
+		if a > b {
+			a, b = b, a
+		}
+		pairs[a+"|"+b] = true
+	}
+	return pairs
+}
 
 var db *gorm.DB
 
@@ -178,60 +221,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": code, "message": msg})
-}
-
-// canPairByRank decide si dos jugadores de la cola pueden enfrentarse
-// (partidas equitativas por RANGO; las divisiones I/II/III no importan):
-//  1. mismo rango de la escalera;
-//  2. racha de 3+ victorias: rival EXACTAMENTE un rango más alto;
-//  3. tras esperar mucho: rangos adyacentes (2 min) o cualquiera (4 min).
-func canPairByRank(a, b models.MatchmakingQueue, streaks map[string]int, waited time.Duration) bool {
-	ta, tb := ranks.TierIndex(a.Points), ranks.TierIndex(b.Points)
-	if ta == tb {
-		return true
-	}
-	diff := ta - tb
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > 1 {
-		return waited >= anyTierAfter
-	}
-	// Rangos adyacentes: vale si el jugador del rango MÁS BAJO tiene racha
-	// (se le sube el rival), o si el que más esperó ya esperó demasiado.
-	if streaks[a.DiscordID] >= ranks.StreakForUpperTier && ta == tb-1 {
-		return true
-	}
-	if streaks[b.DiscordID] >= ranks.StreakForUpperTier && tb == ta-1 {
-		return true
-	}
-	return waited >= adjacentTierAfter
-}
-
-// recentOpponents consulta los sets FINISHED recientes entre jugadores de la
-// cola y devuelve el conjunto de parejas que ya se enfrentaron ("idA|idB",
-// con los IDs ordenados). Ante un error de BD devuelve vacío: es mejor
-// permitir repetir rival que congelar la cola.
-func recentOpponents(tx *gorm.DB, ids []string, window time.Duration) map[string]bool {
-	pairs := map[string]bool{}
-	if len(ids) < 2 {
-		return pairs
-	}
-	var rows []models.Matchmaking
-	if err := tx.Select("player1_discord_id", "player2_discord_id").
-		Where("status = ? AND created_at > ? AND (player1_discord_id IN ? OR player2_discord_id IN ?)",
-			"FINISHED", time.Now().Add(-window), ids, ids).
-		Find(&rows).Error; err != nil {
-		return pairs
-	}
-	for _, m := range rows {
-		a, b := m.Player1DiscordID, m.Player2DiscordID
-		if a > b {
-			a, b = b, a
-		}
-		pairs[a+"|"+b] = true
-	}
-	return pairs
 }
 
 // hasActiveMatch: ¿el usuario tiene una reta en curso (o pendiente)?
@@ -298,14 +287,18 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 		mp = models.MatchmakingPlayer{}
 	}
 	country, state := auth.LocationOf(discordID)
+	glicko := glickoStateOf(mp, time.Now())
 	return map[string]any{
 		"discordId": discordID,
 		"tag":       tag,
 		"avatarUrl": avatar,
 		"country":   country,
 		"state":     state,
-		"points":    points + ranks.BasePoints,
-		"rank":      ranks.InfoFor(points, mp.Wins+mp.Losses),
+		"points":        points + ranks.BasePoints,
+		"rank":          ranks.InfoFor(points, mp.Wins+mp.Losses),
+		"glickoRating":     glicko.Rating,
+		"glickoRD":         glicko.RD,
+		"glickoVolatility": glicko.Volatility,
 		"wins":      mp.Wins,
 		"losses":    mp.Losses,
 		"streak":    mp.Streak,
@@ -340,29 +333,30 @@ func requeue(tx *gorm.DB, discordID string, ft int, joinedAt time.Time) {
 // Emparejador
 // ---------------------------------------------------------------------------
 
-// tryMatch empareja (en una transacción con lock de filas) a los jugadores de
-// la cola: recorre por antigüedad y junta a cada jugador con el primer rival
-// disponible de SU RANGO (partidas equitativas; con racha, un rango arriba).
+// tryMatch recorre la cola por antigüedad y busca el rival elegible más cercano
+// según Glicko-2 (rating + RD). La progresión visible sigue siendo LP/rango.
 func tryMatch() error {
 	return db.Transaction(func(tx *gorm.DB) error {
+		matchNow := time.Now()
 		var entries []models.MatchmakingQueue
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Order("joined_at ASC, discord_id ASC").Find(&entries).Error; err != nil {
 			return err
 		}
 
-		// Rachas de la tabla de matchmaking (habilitan rival de rango superior).
-		streaks := map[string]int{}
+		// Ratings, RD y volatilidad actuales: Glicko-2 decide la compatibilidad.
+		playerRatings := make(map[string]models.MatchmakingPlayer, len(entries))
 		ids := make([]string, 0, len(entries))
 		for _, e := range entries {
 			ids = append(ids, e.DiscordID)
 		}
 		if len(ids) > 0 {
 			var players []models.MatchmakingPlayer
-			if err := tx.Where("discord_id IN ?", ids).Find(&players).Error; err == nil {
-				for _, p := range players {
-					streaks[p.DiscordID] = p.Streak
-				}
+			if err := tx.Where("discord_id IN ?", ids).Find(&players).Error; err != nil {
+				return err
+			}
+			for _, p := range players {
+				playerRatings[p.DiscordID] = p
 			}
 		}
 
@@ -387,49 +381,66 @@ func tryMatch() error {
 			if paired[a.DiscordID] {
 				continue
 			}
+
+			// Entre los rivales elegibles, prioriza la menor distancia Glicko-2
+			// normalizada por la incertidumbre de ambos jugadores.
+			bestJ := -1
+			bestDistance := 1e99
+			waited := matchNow.Sub(a.JoinedAt)
 			for j := i + 1; j < len(entries); j++ {
 				b := entries[j]
 				if paired[b.DiscordID] || a.DiscordID == b.DiscordID {
 					continue
 				}
-				if !canPairByRank(a, b, streaks, time.Since(a.JoinedAt)) {
+				if !canPairByGlicko(a, b, playerRatings, waited, matchNow) {
 					continue
 				}
 				// No repetir rival reciente… salvo que alguno de los dos ya
 				// espere demasiado: repetir es mejor que esperar de más.
 				if isRematch(a, b) &&
-					time.Since(a.JoinedAt) < rematchFallbackAfter &&
-					time.Since(b.JoinedAt) < rematchFallbackAfter {
+					matchNow.Sub(a.JoinedAt) < rematchFallbackAfter &&
+					matchNow.Sub(b.JoinedAt) < rematchFallbackAfter {
 					continue
 				}
-
-				// P1 = quien lleva más tiempo esperando. Los puntos en juego se
-				// estiman con los rangos actuales (se recalculan al terminar).
-				proposal := models.MatchmakingProposal{
-					Player1DiscordID: a.DiscordID,
-					Player1Tag:       a.Username,
-					Player1Avatar:    a.AvatarURL,
-					Player1Points:    a.Points,
-					Player2DiscordID: b.DiscordID,
-					Player2Tag:       b.Username,
-					Player2Avatar:    b.AvatarURL,
-					Player2Points:    b.Points,
-					TargetFT:         3, // ahora todos los sets son FT 3
-					PointsAtStake:    ranks.MaxStakeOf(a.Points, b.Points),
-					Status:           proposalWaiting,
-					CreatedAt:        time.Now(),
-					ExpiresAt:        time.Now().Add(proposalTTL),
+				distance := ranks.Glicko2DistanceSigma(
+					glickoStateOf(playerRatings[a.DiscordID], matchNow),
+					glickoStateOf(playerRatings[b.DiscordID], matchNow),
+				)
+				if distance < bestDistance {
+					bestDistance = distance
+					bestJ = j
 				}
-				if err := tx.Create(&proposal).Error; err != nil {
-					return err
-				}
-				if err := tx.Where("discord_id IN ?", []string{a.DiscordID, b.DiscordID}).
-					Delete(&models.MatchmakingQueue{}).Error; err != nil {
-					return err
-				}
-				paired[a.DiscordID], paired[b.DiscordID] = true, true
-				break
 			}
+			if bestJ < 0 {
+				continue
+			}
+			b := entries[bestJ]
+
+			// LP se estima y liquida con la economía existente; Glicko-2 solo
+			// decide el nivel de habilidad y la selección del rival.
+			proposal := models.MatchmakingProposal{
+				Player1DiscordID: a.DiscordID,
+				Player1Tag:       a.Username,
+				Player1Avatar:    a.AvatarURL,
+				Player1Points:    a.Points,
+				Player2DiscordID: b.DiscordID,
+				Player2Tag:       b.Username,
+				Player2Avatar:    b.AvatarURL,
+				Player2Points:    b.Points,
+				TargetFT:         3,
+				PointsAtStake:    ranks.MaxStakeOf(a.Points, b.Points),
+				Status:           proposalWaiting,
+				CreatedAt:        matchNow,
+				ExpiresAt:        matchNow.Add(proposalTTL),
+			}
+			if err := tx.Create(&proposal).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("discord_id IN ?", []string{a.DiscordID, b.DiscordID}).
+				Delete(&models.MatchmakingQueue{}).Error; err != nil {
+				return err
+			}
+			paired[a.DiscordID], paired[b.DiscordID] = true, true
 		}
 		return nil
 	})
@@ -665,7 +676,7 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2) En cola: buscando rival. Leemos la cola una sola vez para obtener
-	// tanto el total de jugadores como los candidatos compatibles por rango.
+	// tanto el total de jugadores como los candidatos compatibles por Glicko-2.
 	var entries []models.MatchmakingQueue
 	if err := db.Order("joined_at ASC, discord_id ASC").Find(&entries).Error; err != nil {
 		writeErr(w, http.StatusInternalServerError, "bd", "error interno")
@@ -680,16 +691,19 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if entry != nil {
-		// La racha habilita buscar un rival de un rango superior. Cargamos
-		// solo ese dato para usar exactamente las reglas de tryMatch.
-		streaks := make(map[string]int, len(ids))
+		// Ratings y RD para mostrar candidatos con las mismas reglas Glicko-2
+		// que utiliza el emparejador.
+		playerRatings := make(map[string]models.MatchmakingPlayer, len(ids))
 		if len(ids) > 0 {
 			var players []models.MatchmakingPlayer
-			if err := db.Select("discord_id", "streak").Where("discord_id IN ?", ids).Find(&players).Error; err != nil {
-				log.Printf("⚠️ WebQueue: no se pudieron leer las rachas para el estado de búsqueda: %v", err)
+			if err := db.Select("discord_id", "glicko_rating", "glicko_rd", "glicko_volatility", "glicko_last_rated_at").
+				Where("discord_id IN ?", ids).Find(&players).Error; err != nil {
+				log.Printf("⚠️ WebQueue: no se pudieron leer ratings Glicko-2: %v", err)
+				writeErr(w, http.StatusInternalServerError, "bd", "No se pudo consultar el rating de habilidad. Intenta de nuevo.")
+				return
 			} else {
 				for _, player := range players {
-					streaks[player.DiscordID] = player.Streak
+					playerRatings[player.DiscordID] = player
 				}
 			}
 		}
@@ -701,16 +715,15 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		}
 		rematches := recentOpponents(db, ids, rematchWindowForQueue)
 		resp["status"] = "searching"
-		resp["search"] = queueSearchProgressFor(*entry, entries, streaks, rematches, now)
+		resp["search"] = queueSearchProgressFor(*entry, entries, playerRatings, rematches, now)
 		resp["queue"] = map[string]any{
 			"ft":      entry.TargetFT,
 			"since":   entry.JoinedAt,
 			"players": len(entries),
-			// Informativo para el frontend viejo: ±100 pts ≈ un rango.
-			// El emparejamiento real es por RANGO (no por puntos).
+			// Campo legacy para compatibilidad; ya no limita el emparejamiento.
+			// El criterio real es la distancia Glicko-2.
 			"radius": 100,
-			// true cuando ya se aceptan rangos adyacentes (la búsqueda se
-			// amplió por tiempo de espera); el frontend puede mostrarlo.
+			// true cuando se amplía la ventana de habilidad por tiempo de espera.
 			"wide": elapsed >= adjacentTierAfter,
 		}
 		writeJSON(w, http.StatusOK, resp)

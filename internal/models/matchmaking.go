@@ -78,7 +78,13 @@ type MatchmakingPlayer struct {
 	Points    int       `gorm:"index" json:"points"`
 	Wins      int       `json:"wins"`
 	Losses    int       `json:"losses"`
-	Streak    int       `json:"streak"` // victorias seguidas: 3+ empareja contra un rango superior
+	Streak    int       `json:"streak"` // victorias seguidas: bonus visible de LP
+	// Rating de habilidad Glicko-2: independiente de la escalera visible de LP.
+	// Defaults de jugadores nuevos según el modelo estándar.
+	GlickoRating      float64    `gorm:"not null;default:1500" json:"glickoRating"`
+	GlickoRD          float64    `gorm:"not null;default:350" json:"glickoRD"`
+	GlickoVolatility  float64    `gorm:"not null;default:0.06" json:"glickoVolatility"`
+	GlickoLastRatedAt *time.Time `json:"glickoLastRatedAt,omitempty"`
 	// Escudo anti-descenso: se gana al ascender de división y se consume con
 	// la primera derrota que bajaría de división (esa cae solo a 0 LP).
 	DemotionShield bool      `json:"demotionShield"`

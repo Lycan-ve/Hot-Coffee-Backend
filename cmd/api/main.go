@@ -165,8 +165,9 @@ func applyProfileMains(players []models.Player) {
 	}
 }
 
-// locationMap lee solo nacionalidades que el propio jugador ya confirmó.
-// Las sugerencias de Start.gg se muestran únicamente en su perfil privado.
+// locationMap lee la nacionalidad (users.country / users.state) de los IDs de
+// Discord dados. La sync de Start.gg mantiene esos campos al día; la elección
+// manual hecha en la web también termina ahí.
 func locationMap(ids []string) map[string][2]string {
 	locs := make(map[string][2]string, len(ids))
 	if len(ids) == 0 {
@@ -210,16 +211,22 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	players := []models.MatchmakingPlayer{}
-	if err := db.Order("points DESC, wins DESC, username ASC").Find(&players).Error; err != nil {
+	if err := db.Order("glicko_rating DESC, points DESC, wins DESC, username ASC").Find(&players).Error; err != nil {
 		log.Println("❌ Rankings (matchmaking):", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
 		return
 	}
 
-	// Posición con empates: quienes tienen los mismos puntos comparten posición (1, 1, 3...)
+	// Posición por habilidad estimada: el orden principal es Glicko-2.
+	// Los empates exactos de rating comparten posición aunque sus LP difieran.
 	for i := range players {
-		if i > 0 && players[i].Points == players[i-1].Points {
+		currentGlicko := ranks.Glicko2At(ranks.Glicko2Rating{
+			Rating: players[i].GlickoRating, RD: players[i].GlickoRD,
+			Volatility: players[i].GlickoVolatility, LastRatedAt: players[i].GlickoLastRatedAt,
+		}, time.Now())
+		players[i].GlickoRD = currentGlicko.RD
+		if i > 0 && players[i].GlickoRating == players[i-1].GlickoRating {
 			players[i].Ranking = players[i-1].Ranking
 		} else {
 			players[i].Ranking = i + 1

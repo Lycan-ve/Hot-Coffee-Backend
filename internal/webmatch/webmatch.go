@@ -1242,6 +1242,20 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 		return errors.New("no se encontraron los jugadores del set")
 	}
 
+	// Glicko-2 se actualiza como una métrica independiente de LP.
+	// Ambos jugadores se calculan usando los ratings/RD anteriores al set.
+	now := time.Now()
+	winnerGlicko, loserGlicko := ranks.UpdateGlicko2Pair(
+		ranks.Glicko2Rating{Rating: winner.GlickoRating, RD: winner.GlickoRD, Volatility: winner.GlickoVolatility, LastRatedAt: winner.GlickoLastRatedAt},
+		ranks.Glicko2Rating{Rating: loser.GlickoRating, RD: loser.GlickoRD, Volatility: loser.GlickoVolatility, LastRatedAt: loser.GlickoLastRatedAt},
+		1,
+		now,
+	)
+	winner.GlickoRating, winner.GlickoRD, winner.GlickoVolatility, winner.GlickoLastRatedAt =
+		winnerGlicko.Rating, winnerGlicko.RD, winnerGlicko.Volatility, winnerGlicko.LastRatedAt
+	loser.GlickoRating, loser.GlickoRD, loser.GlickoVolatility, loser.GlickoLastRatedAt =
+		loserGlicko.Rating, loserGlicko.RD, loserGlicko.Volatility, loserGlicko.LastRatedAt
+
 	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus LP
 	// suben/bajan con deltas FIJOS de clasificación y el neto de esos 5 sets
 	// decide el rango inicial. El rival ya clasificado cobra con las reglas
