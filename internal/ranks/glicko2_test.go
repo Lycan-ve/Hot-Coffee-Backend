@@ -63,6 +63,24 @@ func TestGlicko2DistanceUsesBothUncertainties(t *testing.T) {
 	assertNear(t, "normalized distance", got, want, 1e-12)
 }
 
+func TestGlicko2RDInflatesAfterInactivity(t *testing.T) {
+	lastRated := time.Date(2026, time.November, 1, 0, 0, 0, 0, time.UTC)
+	rating := Glicko2Rating{
+		Rating: 1600, RD: 100, Volatility: 0.06, LastRatedAt: &lastRated,
+	}
+	now := lastRated.Add(3 * Glicko2InactivityPeriod)
+	got := Glicko2At(rating, now)
+	if got.RD <= rating.RD {
+		t.Fatalf("RD after inactivity = %.3f, want > %.3f", got.RD, rating.RD)
+	}
+	if got.RD > Glicko2DefaultRD {
+		t.Fatalf("RD after inactivity = %.3f, should be capped at %.3f", got.RD, Glicko2DefaultRD)
+	}
+	if got.Rating != rating.Rating {
+		t.Fatalf("rating changed during inactivity: got %.3f, want %.3f", got.Rating, rating.Rating)
+	}
+}
+
 func TestGlicko2DefaultsForUninitializedPlayers(t *testing.T) {
 	got := normalizeGlicko2(Glicko2Rating{})
 	want := DefaultGlicko2Rating()
