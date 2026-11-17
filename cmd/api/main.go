@@ -221,6 +221,11 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 	// Posición por habilidad estimada: el orden principal es Glicko-2.
 	// Los empates exactos de rating comparten posición aunque sus LP difieran.
 	for i := range players {
+		currentGlicko := ranks.Glicko2At(ranks.Glicko2Rating{
+			Rating: players[i].GlickoRating, RD: players[i].GlickoRD,
+			Volatility: players[i].GlickoVolatility, LastRatedAt: players[i].GlickoLastRatedAt,
+		}, time.Now())
+		players[i].GlickoRD = currentGlicko.RD
 		if i > 0 && players[i].GlickoRating == players[i-1].GlickoRating {
 			players[i].Ranking = players[i-1].Ranking
 		} else {
