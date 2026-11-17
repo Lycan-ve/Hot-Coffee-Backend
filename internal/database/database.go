@@ -51,14 +51,19 @@ func Connect() *gorm.DB {
 	// Normaliza filas existentes creadas antes de incorporar Glicko-2. Las
 	// columnas nuevas ya tienen defaults, pero este UPDATE cubre filas donde
 	// el motor haya materializado cero en vez del default.
-	if err := db.Model(&models.MatchmakingPlayer{}).
-		Where("glicko_rating = 0 OR glicko_rd = 0 OR glicko_volatility = 0").
-		Updates(map[string]any{
-			"glicko_rating":     1500.0,
-			"glicko_rd":         350.0,
-			"glicko_volatility": 0.06,
-		}).Error; err != nil {
-		log.Fatal("❌ Error inicializando ratings Glicko-2 existentes:", err)
+	for _, field := range []struct {
+		column string
+		value  float64
+	}{
+		{column: "glicko_rating", value: 1500.0},
+		{column: "glicko_rd", value: 350.0},
+		{column: "glicko_volatility", value: 0.06},
+	} {
+		if err := db.Model(&models.MatchmakingPlayer{}).
+			Where(field.column+" = 0").
+			Update(field.column, field.value).Error; err != nil {
+			log.Fatal("❌ Error inicializando ", field.column, " de Glicko-2:", err)
+		}
 	}
 
 	log.Println("✅ Base de datos conectada y migrada correctamente.")
