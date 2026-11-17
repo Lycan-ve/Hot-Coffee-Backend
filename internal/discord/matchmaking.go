@@ -1670,6 +1670,20 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 		return report, errors.New("no se encontraron los jugadores de matchmaking de esta reta")
 	}
 
+	// Glicko-2 se actualiza como una métrica independiente de LP.
+	// Ambos jugadores se calculan usando los ratings/RD anteriores al set.
+	now := time.Now()
+	winnerGlicko, loserGlicko := ranks.UpdateGlicko2Pair(
+		ranks.Glicko2Rating{Rating: winner.GlickoRating, RD: winner.GlickoRD, Volatility: winner.GlickoVolatility, LastRatedAt: winner.GlickoLastRatedAt},
+		ranks.Glicko2Rating{Rating: loser.GlickoRating, RD: loser.GlickoRD, Volatility: loser.GlickoVolatility, LastRatedAt: loser.GlickoLastRatedAt},
+		1,
+		now,
+	)
+	winner.GlickoRating, winner.GlickoRD, winner.GlickoVolatility, winner.GlickoLastRatedAt =
+		winnerGlicko.Rating, winnerGlicko.RD, winnerGlicko.Volatility, winnerGlicko.LastRatedAt
+	loser.GlickoRating, loser.GlickoRD, loser.GlickoVolatility, loser.GlickoLastRatedAt =
+		loserGlicko.Rating, loserGlicko.RD, loserGlicko.Volatility, loserGlicko.LastRatedAt
+
 	report.OldRankW = matchmakingRank(tx, winner.Points)
 	report.OldRankL = matchmakingRank(tx, loser.Points)
 
