@@ -1731,14 +1731,14 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 			loserNew = ranks.PlacementFloor
 		}
 	} else {
-		if loserNew < ranks.MinPointsFloor {
-			loserNew = ranks.MinPointsFloor
+		if loserNew < ranks.MinRPFloor {
+			loserNew = ranks.MinRPFloor
 		}
 		if loserNew > loser.Points { // perder nunca sube los puntos
 			loserNew = loser.Points
 		}
 		// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
-		// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
+		// escudo (lo gana al ascender), cae solo al RP inicial de SU división y lo gasta.
 		if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
 			if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
 				loserNew = floor
