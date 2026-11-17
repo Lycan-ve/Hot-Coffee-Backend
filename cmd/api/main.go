@@ -211,16 +211,17 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	players := []models.MatchmakingPlayer{}
-	if err := db.Order("points DESC, wins DESC, username ASC").Find(&players).Error; err != nil {
+	if err := db.Order("glicko_rating DESC, points DESC, wins DESC, username ASC").Find(&players).Error; err != nil {
 		log.Println("❌ Rankings (matchmaking):", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "error_interno"})
 		return
 	}
 
-	// Posición con empates: quienes tienen los mismos puntos comparten posición (1, 1, 3...)
+	// Posición por habilidad estimada: el orden principal es Glicko-2.
+	// Los empates exactos de rating comparten posición aunque sus LP difieran.
 	for i := range players {
-		if i > 0 && players[i].Points == players[i-1].Points {
+		if i > 0 && players[i].GlickoRating == players[i-1].GlickoRating {
 			players[i].Ranking = players[i-1].Ranking
 		} else {
 			players[i].Ranking = i + 1
