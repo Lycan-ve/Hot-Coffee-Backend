@@ -263,6 +263,7 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 		mp = models.MatchmakingPlayer{}
 	}
 	country, state := auth.LocationOf(discordID)
+	glicko := glickoStateOf(mp)
 	return map[string]any{
 		"discordId": discordID,
 		"tag":       tag,
@@ -271,9 +272,9 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 		"state":     state,
 		"points":        points + ranks.BasePoints,
 		"rank":          ranks.InfoFor(points, mp.Wins+mp.Losses),
-		"glickoRating":  mp.GlickoRating,
-		"glickoRD":      mp.GlickoRD,
-		"glickoVolatility": mp.GlickoVolatility,
+		"glickoRating":     glicko.Rating,
+		"glickoRD":         glicko.RD,
+		"glickoVolatility": glicko.Volatility,
 		"wins":      mp.Wins,
 		"losses":    mp.Losses,
 		"streak":    mp.Streak,
