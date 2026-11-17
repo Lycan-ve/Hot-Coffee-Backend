@@ -280,7 +280,7 @@ func playerPoints(discordID string) int {
 // playerCard arma la ficha de un jugador para el VS de la propuesta.
 // Incluye récord y racha (de matchmaking_players) para dar contexto del rival.
 // Nadie parte con rango: sin los 5 sets de clasificación completados el
-// display es "SIN RANGO" (sin emblema ni LP).
+// display es "SIN RANGO" (sin emblema ni RP).
 func playerCard(discordID, tag, avatar string, points int) map[string]any {
 	var mp models.MatchmakingPlayer
 	if err := db.Where("discord_id = ?", discordID).First(&mp).Error; err != nil {
@@ -294,7 +294,7 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 		"avatarUrl": avatar,
 		"country":   country,
 		"state":     state,
-		"points":        points + ranks.BasePoints,
+		"points":        points,
 		"rank":          ranks.InfoFor(points, mp.Wins+mp.Losses),
 		"glickoRating":     glicko.Rating,
 		"glickoRD":         glicko.RD,
@@ -334,7 +334,7 @@ func requeue(tx *gorm.DB, discordID string, ft int, joinedAt time.Time) {
 // ---------------------------------------------------------------------------
 
 // tryMatch recorre la cola por antigüedad y busca el rival elegible más cercano
-// según Glicko-2 (rating + RD). La progresión visible sigue siendo LP/rango.
+// según Glicko-2 (rating + RD). La progresión visible sigue siendo RP/rango.
 func tryMatch() error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		matchNow := time.Now()
@@ -416,7 +416,7 @@ func tryMatch() error {
 			}
 			b := entries[bestJ]
 
-			// LP se estima y liquida con la economía existente; Glicko-2 solo
+			// RP se estima y liquida con la economía existente; Glicko-2 solo
 			// decide el nivel de habilidad y la selección del rival.
 			proposal := models.MatchmakingProposal{
 				Player1DiscordID: a.DiscordID,
