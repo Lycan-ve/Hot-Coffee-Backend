@@ -25,9 +25,13 @@ func InfoFor(pointsWon, games int) Info {
 	info.Tier = ""
 	info.DisplayName = UnrankedLabel
 	info.IsRP = false
-	info.RP = 0
+	provisionalRP := pointsWon
+	if provisionalRP < 0 {
+		provisionalRP = 0
+	}
+	info.RP = provisionalRP
 	info.RPToNext = 0
-	info.Points = 0
+	info.Points = provisionalRP
 	info.Next = ""
 	info.NextIsRP = false
 	info.IconPath = ""
