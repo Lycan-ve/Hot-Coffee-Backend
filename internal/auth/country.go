@@ -56,9 +56,9 @@ func CountryOf(discordID string) string {
 }
 
 // handleCountry: GET/POST /api/auth/country — nacionalidad del jugador.
-// Normalmente la toma la sync de Start.gg (ubicación del perfil); POST
-// permite elegirla a mano como respaldo: {"country":"VE"} ("" la quita).
-// GET devuelve {"country", "state", "source"} con lo que haya guardado.
+// POST {"country":"VE","confirm":true} confirma la sugerencia que ya guardó
+// Start.gg sin perder el estado. POST {"country":"VE"} cambia el país y lo
+// confirma manualmente. GET incluye countryConfirmed para guiar el perfil.
 func handleCountry(w http.ResponseWriter, r *http.Request) {
 	if setCors(w, r) {
 		return
@@ -81,6 +81,7 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var body struct {
 			Country string `json:"country"`
+			Confirm bool   `json:"confirm"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -92,24 +93,53 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		code := strings.ToUpper(strings.TrimSpace(body.Country))
-		if code != "" && !ValidCountry(code) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "pais_invalido",
-				"message": "Ese país no está en la lista disponible.",
-			})
-			return
-		}
-		user.Country = code
-		// La elección manual no tiene estado/región y se marca como tal para
-		// que la web sepa que puede ofrecer cambiarla. Vaciar el país borra
-		// también la marca (la sync de Start.gg volverá a llenarla).
-		user.State = ""
-		if code == "" {
-			user.CountrySource = ""
+		if body.Confirm {
+			// La confirmación debe referirse exactamente al país que se está
+			// mostrando. Esto evita confirmar una sugerencia obsoleta si Start.gg
+			// se sincronizó mientras el perfil estaba abierto.
+			if code == "" || !ValidCountry(code) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error":   "pais_invalido",
+					"message": "No hay un país válido para confirmar. Selecciona tu nacionalidad.",
+				})
+				return
+			}
+			if strings.ToUpper(strings.TrimSpace(user.Country)) != code {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error":   "pais_actualizado",
+					"message": "La nacionalidad sugerida cambió. Actualiza tu perfil y vuelve a confirmarla.",
+				})
+				return
+			}
+			user.CountryConfirmed = true
+			if user.CountrySource == "" {
+				user.CountrySource = "manual"
+			}
 		} else {
-			user.CountrySource = "manual"
+			if code != "" && !ValidCountry(code) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error":   "pais_invalido",
+					"message": "Ese país no está en la lista disponible.",
+				})
+				return
+			}
+			user.Country = code
+			// Al elegir otro país no tenemos una región fiable: se limpia el
+			// estado anterior y la elección queda confirmada por el usuario.
+			user.State = ""
+			if code == "" {
+				user.CountrySource = ""
+				user.CountryConfirmed = false
+			} else {
+				user.CountrySource = "manual"
+				user.CountryConfirmed = true
+			}
 		}
 		if err := db.Save(&user).Error; err != nil {
 			log.Println("❌ Country: error guardando el país:", err)
@@ -124,6 +154,7 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"country": strings.ToUpper(strings.TrimSpace(user.Country)),
 		"state":   strings.ToUpper(strings.TrimSpace(user.State)),
-		"source":  user.CountrySource,
+		"source":           user.CountrySource,
+		"countryConfirmed": user.CountryConfirmed,
 	})
 }
