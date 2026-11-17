@@ -116,7 +116,7 @@ func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.Matc
 		if waited < 0 {
 			waited = 0
 		}
-		if !canPairByGlicko(entry, peer, playerRatings, waited) {
+		if !canPairByGlicko(entry, peer, playerRatings, waited, now) {
 			continue
 		}
 		a, b := entry.DiscordID, peer.DiscordID
@@ -144,18 +144,19 @@ func queueSearchProgressFor(entry models.MatchmakingQueue, entries []models.Matc
 
 // glickoStateOf adapta la fila persistida al modelo matemático. Los defaults
 // cubren perfiles de cola sin fila previa de ranking.
-func glickoStateOf(p models.MatchmakingPlayer) ranks.Glicko2Rating {
-	return ranks.Glicko2Rating{
+func glickoStateOf(p models.MatchmakingPlayer, now time.Time) ranks.Glicko2Rating {
+	return ranks.Glicko2At(ranks.Glicko2Rating{
 		Rating:     p.GlickoRating,
 		RD:         p.GlickoRD,
 		Volatility: p.GlickoVolatility,
-	}
+		LastRatedAt: p.GlickoLastRatedAt,
+	}, now)
 }
 
 // canPairByGlicko usa la distancia de ratings en desviaciones estándar
 // combinadas. La tolerancia se amplía con la espera y mantiene el fallback
 // de 4 minutos para que una cola pequeña no se quede bloqueada.
-func canPairByGlicko(a, b models.MatchmakingQueue, playerRatings map[string]models.MatchmakingPlayer, waited time.Duration) bool {
+func canPairByGlicko(a, b models.MatchmakingQueue, playerRatings map[string]models.MatchmakingPlayer, waited time.Duration, now time.Time) bool {
 	if waited >= anyTierAfter {
 		return true
 	}
@@ -163,8 +164,8 @@ func canPairByGlicko(a, b models.MatchmakingQueue, playerRatings map[string]mode
 	if waited >= adjacentTierAfter {
 		sigmaWindow = 2.0
 	}
-	ra := glickoStateOf(playerRatings[a.DiscordID])
-	rb := glickoStateOf(playerRatings[b.DiscordID])
+	ra := glickoStateOf(playerRatings[a.DiscordID], now)
+	rb := glickoStateOf(playerRatings[b.DiscordID], now)
 	return ranks.Glicko2DistanceSigma(ra, rb) <= sigmaWindow
 }
 
@@ -263,7 +264,7 @@ func playerCard(discordID, tag, avatar string, points int) map[string]any {
 		mp = models.MatchmakingPlayer{}
 	}
 	country, state := auth.LocationOf(discordID)
-	glicko := glickoStateOf(mp)
+	glicko := glickoStateOf(mp, time.Now())
 	return map[string]any{
 		"discordId": discordID,
 		"tag":       tag,
@@ -368,7 +369,7 @@ func tryMatch() error {
 				if paired[b.DiscordID] || a.DiscordID == b.DiscordID {
 					continue
 				}
-				if !canPairByGlicko(a, b, playerRatings, waited) {
+				if !canPairByGlicko(a, b, playerRatings, waited, time.Now()) {
 					continue
 				}
 				// No repetir rival reciente… salvo que alguno de los dos ya
@@ -379,8 +380,8 @@ func tryMatch() error {
 					continue
 				}
 				distance := ranks.Glicko2DistanceSigma(
-					glickoStateOf(playerRatings[a.DiscordID]),
-					glickoStateOf(playerRatings[b.DiscordID]),
+					glickoStateOf(playerRatings[a.DiscordID], time.Now()),
+					glickoStateOf(playerRatings[b.DiscordID], time.Now()),
 				)
 				if distance < bestDistance {
 					bestDistance = distance
