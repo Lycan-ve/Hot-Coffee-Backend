@@ -32,9 +32,11 @@ type Glicko2Rating struct {
 // Glicko2Opponent representa un resultado desde el punto de vista del jugador:
 // score=1 victoria, score=0.5 empate, score=0 derrota.
 type Glicko2Opponent struct {
-	Rating     float64
-	RD         float64
-	Score      float64
+	Rating      float64
+	RD          float64
+	Volatility  float64
+	LastRatedAt *time.Time
+	Score       float64
 }
 
 // DefaultGlicko2Rating devuelve los valores iniciales estándar para un jugador
@@ -131,9 +133,18 @@ func UpdateGlicko2Pair(a, b Glicko2Rating, scoreA float64, now time.Time) (Glick
 	if now.IsZero() {
 		now = time.Now()
 	}
-	// Ambos cálculos reciben los datos pre-set; el primero no contamina al segundo.
-	nextA := UpdateGlicko2(a, []Glicko2Opponent{{Rating: b.Rating, RD: b.RD, Score: scoreA}}, now)
-	nextB := UpdateGlicko2(b, []Glicko2Opponent{{Rating: a.Rating, RD: a.RD, Score: 1 - scoreA}}, now)
+	// Ajusta ambas RD por inactividad antes de calcular; los dos cálculos reciben
+	// los mismos datos previos al set y no se contaminan entre sí.
+	a = Glicko2At(a, now)
+	b = Glicko2At(b, now)
+	nextA := UpdateGlicko2(a, []Glicko2Opponent{{
+		Rating: b.Rating, RD: b.RD, Volatility: b.Volatility,
+		LastRatedAt: b.LastRatedAt, Score: scoreA,
+	}}, now)
+	nextB := UpdateGlicko2(b, []Glicko2Opponent{{
+		Rating: a.Rating, RD: a.RD, Volatility: a.Volatility,
+		LastRatedAt: a.LastRatedAt, Score: 1 - scoreA,
+	}}, now)
 	return nextA, nextB
 }
 
@@ -160,9 +171,10 @@ func UpdateGlicko2(player Glicko2Rating, opponents []Glicko2Opponent, now time.T
 			continue
 		}
 		opponentRating := Glicko2At(Glicko2Rating{
-			Rating: opponent.Rating,
-			RD:     opponent.RD,
-			Volatility: Glicko2DefaultVolatility,
+			Rating:      opponent.Rating,
+			RD:          opponent.RD,
+			Volatility:  opponent.Volatility,
+			LastRatedAt: opponent.LastRatedAt,
 		}, now)
 		opponentMu := (opponentRating.Rating - Glicko2DefaultRating) / glicko2Scale
 		opponentPhi := opponentRating.RD / glicko2Scale
