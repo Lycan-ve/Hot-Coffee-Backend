@@ -96,6 +96,7 @@ func TestQueueSearchProgressForGlickoPhases(t *testing.T) {
 }
 
 func TestCanPairByGlickoUsesCombinedRDAndWaitExpansion(t *testing.T) {
+	now := time.Now().UTC()
 	a := models.MatchmakingQueue{DiscordID: "a"}
 	b := models.MatchmakingQueue{DiscordID: "b"}
 	ratings := map[string]models.MatchmakingPlayer{
@@ -103,10 +104,10 @@ func TestCanPairByGlickoUsesCombinedRDAndWaitExpansion(t *testing.T) {
 		"b": {DiscordID: "b", GlickoRating: 1770, GlickoRD: 100, GlickoVolatility: 0.06},
 	}
 
-	if canPairByGlicko(a, b, ratings, 10*time.Second) {
+	if canPairByGlicko(a, b, ratings, 10*time.Second, now) {
 		t.Fatal("players should not pair inside the narrow initial window")
 	}
-	if !canPairByGlicko(a, b, ratings, 3*time.Minute) {
+	if !canPairByGlicko(a, b, ratings, 3*time.Minute, now) {
 		t.Fatal("players should pair after the Glicko window expands")
 	}
 }
