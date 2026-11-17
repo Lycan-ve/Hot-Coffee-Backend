@@ -168,6 +168,30 @@ func canPairByGlicko(a, b models.MatchmakingQueue, playerRatings map[string]mode
 	return ranks.Glicko2DistanceSigma(ra, rb) <= sigmaWindow
 }
 
+// recentOpponents devuelve los pares que ya se enfrentaron en una ventana
+// reciente, para conservar la rotación de rivales del matchmaking.
+func recentOpponents(tx *gorm.DB, ids []string, window time.Duration) map[string]bool {
+	pairs := map[string]bool{}
+	if len(ids) < 2 {
+		return pairs
+	}
+	var rows []models.Matchmaking
+	if err := tx.Select("player1_discord_id", "player2_discord_id").
+		Where("status = ? AND created_at > ? AND (player1_discord_id IN ? OR player2_discord_id IN ?)",
+			"FINISHED", time.Now().Add(-window), ids, ids).
+		Find(&rows).Error; err != nil {
+		return pairs
+	}
+	for _, m := range rows {
+		a, b := m.Player1DiscordID, m.Player2DiscordID
+		if a > b {
+			a, b = b, a
+		}
+		pairs[a+"|"+b] = true
+	}
+	return pairs
+}
+
 var db *gorm.DB
 
 // RegisterRoutes registra la API de la cola y arranca el sweeper de fondo.
