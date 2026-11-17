@@ -129,10 +129,12 @@ func handleCountry(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+			// Si el usuario vuelve a guardar el mismo país, conservamos la
+			// región válida que llegó de Start.gg. Solo se limpia al cambiar país.
+			if code != user.Country {
+				user.State = ""
+			}
 			user.Country = code
-			// Al elegir otro país no tenemos una región fiable: se limpia el
-			// estado anterior y la elección queda confirmada por el usuario.
-			user.State = ""
 			if code == "" {
 				user.CountrySource = ""
 				user.CountryConfirmed = false
