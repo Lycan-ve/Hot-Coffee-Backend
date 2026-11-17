@@ -65,8 +65,8 @@ func fetchUserLocation(client *http.Client, token, slug string) (country, state 
 // fila del usuario. SOLO actualiza filas existentes: desde la sync nunca se
 // crean usuarios (esa fila la crea el login de Discord) para no romper el
 // fallback de perfiles públicos del módulo auth.
-// Start.gg manda: si reporta país, sobrescribe lo que hubiera; la elección
-// manual en la web queda como respaldo para quien no tiene ubicación ahí.
+// Start.gg solo propone/actualiza la nacionalidad mientras el jugador no la
+// haya confirmado. Una confirmación explícita siempre tiene prioridad.
 func SaveUserLocation(db *gorm.DB, discordID, rawCountry, rawState string) {
 	country := NormalizeCountry(rawCountry)
 	if country == "" || discordID == "" {
@@ -74,7 +74,7 @@ func SaveUserLocation(db *gorm.DB, discordID, rawCountry, rawState string) {
 	}
 	state := NormalizeState(country, rawState)
 	if err := db.Model(&models.User{}).
-		Where("discord_id = ?", discordID).
+		Where("discord_id = ? AND country_confirmed = ?", discordID, false).
 		Updates(map[string]any{
 			"country":        country,
 			"state":          state,

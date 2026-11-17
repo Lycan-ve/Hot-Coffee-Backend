@@ -175,7 +175,7 @@ func locationMap(ids []string) map[string][2]string {
 	}
 	var users []models.User
 	if err := db.Select("discord_id, country, state").
-		Where("discord_id IN ?", ids).Find(&users).Error; err != nil {
+		Where("discord_id IN ? AND country_confirmed = ?", ids, true).Find(&users).Error; err != nil {
 		log.Println("⚠️ Rankings: no se pudo leer la nacionalidad:", err)
 		return locs
 	}
