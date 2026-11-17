@@ -12,7 +12,7 @@ const unrankedColor = "#9a9a9a"
 
 // InfoFor envuelve FromPoints para el DISPLAY: si el jugador aún no completó
 // sus sets de clasificación (games < PlacementGames) devuelve la información
-// SIN RANGO (sin emblema, sin LP y sin siguiente división). El emparejamiento
+// SIN RANGO (sin emblema, sin RP y sin siguiente división). El emparejamiento
 // y la liquidación siguen usando FromPoints/TierIndex con los puntos reales;
 // esto solo cambia lo que se muestra en la web.
 func InfoFor(pointsWon, games int) Info {
@@ -25,9 +25,13 @@ func InfoFor(pointsWon, games int) Info {
 	info.Tier = ""
 	info.DisplayName = UnrankedLabel
 	info.IsRP = false
-	info.LP = 0
-	info.RP = 0
-	info.LPToNext = 0
+	provisionalRP := pointsWon
+	if provisionalRP < 0 {
+		provisionalRP = 0
+	}
+	info.RP = provisionalRP
+	info.RPToNext = 0
+	info.Points = provisionalRP
 	info.Next = ""
 	info.NextIsRP = false
 	info.IconPath = ""

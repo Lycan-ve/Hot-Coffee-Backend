@@ -75,10 +75,10 @@ type MatchmakingPlayer struct {
 	DiscordID string    `gorm:"primaryKey" json:"discordId"`
 	Username  string    `json:"username"`
 	AvatarURL string    `json:"avatarUrl"`
-	Points    int       `gorm:"index" json:"points"`
+	Points    int       `gorm:"index" json:"points"` // RP de matchmaking; comienzan en cero
 	Wins      int       `json:"wins"`
 	Losses    int       `json:"losses"`
-	Streak    int       `json:"streak"` // victorias seguidas: bonus visible de LP
+	Streak    int       `json:"streak"` // victorias seguidas: bonus visible de RP
 	// Rating de habilidad Glicko-2: independiente de la escalera visible de LP.
 	// Defaults de jugadores nuevos según el modelo estándar.
 	GlickoRating      float64    `gorm:"not null;default:1500" json:"glickoRating"`

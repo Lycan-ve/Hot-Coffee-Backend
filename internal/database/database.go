@@ -80,6 +80,14 @@ func Connect() *gorm.DB {
 		log.Fatal("❌ Error migrando las nacionalidades manuales confirmadas:", err)
 	}
 
+	// Los RP no pueden ser negativos. Normaliza registros de placements
+	// anteriores a la regla de inicio en cero.
+	if err := db.Model(&models.MatchmakingPlayer{}).
+		Where("points < 0").
+		Update("points", 0).Error; err != nil {
+		log.Fatal("❌ Error normalizando RP negativos:", err)
+	}
+
 	log.Println("✅ Base de datos conectada y migrada correctamente.")
 	return db
 }

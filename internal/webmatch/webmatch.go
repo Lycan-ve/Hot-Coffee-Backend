@@ -30,7 +30,7 @@ const (
 	// Fallback para sets VIEJOS (terminados antes de las reglas por rango),
 	// que no guardaban el delta real de cada jugador.
 	loserPenalty   = 5
-	minPointsFloor = 5
+	minRPFloor = 0
 
 	chatMaxLen = 500 // caracteres del chat
 	chatWindow = 100 // mensajes máximos por poll
@@ -239,7 +239,7 @@ func playerGames(discordID string) int {
 }
 
 // playerRank: rango para la sala. Nadie parte con rango: sin los 5 sets de
-// clasificación completados el display es "SIN RANGO" (sin emblema ni LP).
+// clasificación completados el display es "SIN RANGO" (sin emblema ni RP).
 func playerRank(pointsWon, games int) ranks.Info {
 	return ranks.InfoFor(pointsWon, games)
 }
@@ -318,7 +318,7 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 			"avatarUrl": meAvatar,
 			"country":   meCountry,
 			"state":     meState,
-			"points":    mePts + ranks.BasePoints,
+			"points":    mePts,
 			"rank":      playerRank(mePts, playerGames(meID)),
 			"score":     myScore,
 			"team":      meTeam,
@@ -329,7 +329,7 @@ func matchPayload(m *models.Matchmaking, discordID string) map[string]any {
 			"avatarUrl": oppAvatar,
 			"country":   oppCountry,
 			"state":     oppState,
-			"points":    oppPts + ranks.BasePoints,
+			"points":    oppPts,
 			"rank":      playerRank(oppPts, playerGames(oppID)),
 			"score":     oppScore,
 			"team":      oppTeam,
@@ -421,7 +421,7 @@ func finishedPayload(m *models.Matchmaking, discordID string, myScore, oppScore 
 		"myScore":   myScore,
 		"oppScore":  oppScore,
 		"delta":     delta,
-		"myPoints":  points + ranks.BasePoints,
+		"myPoints":  points,
 		"rank":      playerRank(points, playerGames(discordID)),
 		"winnerTag": sideTag(m, m.WinnerDiscordID),
 	}
@@ -1242,7 +1242,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 		return errors.New("no se encontraron los jugadores del set")
 	}
 
-	// Glicko-2 se actualiza como una métrica independiente de LP.
+	// Glicko-2 se actualiza como una métrica independiente de RP.
 	// Ambos jugadores se calculan usando los ratings/RD anteriores al set.
 	now := time.Now()
 	winnerGlicko, loserGlicko := ranks.UpdateGlicko2Pair(
@@ -1256,7 +1256,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 	loser.GlickoRating, loser.GlickoRD, loser.GlickoVolatility, loser.GlickoLastRatedAt =
 		loserGlicko.Rating, loserGlicko.RD, loserGlicko.Volatility, loserGlicko.LastRatedAt
 
-	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus LP
+	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus RP
 	// suben/bajan con deltas FIJOS de clasificación y el neto de esos 5 sets
 	// decide el rango inicial. El rival ya clasificado cobra con las reglas
 	// normales (el clasificante cuenta con el nivel de sus puntos actuales).
@@ -1271,10 +1271,10 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 		// no importan. Vencer a un rango superior da más puntos; caer ante uno
 		// inferior cuesta más. Se recalculan AQUÍ con los rangos reales del final.
 		stake = ranks.WinPoints(winner.Points, loser.Points)
-		// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
+		// Bonos de RP: racha caliente (la 3ª victoria seguida y las siguientes
 		// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
 		// perfecto sin ceder games. Se incluyen en WinnerDelta para que la sala
-		// muestre el LP real ganado.
+		// muestre el RP real ganado.
 		stake += ranks.StreakBonus(winner.Streak)
 		winScore, loseScore := m.Score1, m.Score2
 		if winScore < loseScore {
@@ -1298,14 +1298,14 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) error {
 			loserNew = ranks.PlacementFloor
 		}
 	} else {
-		if loserNew < ranks.MinPointsFloor {
-			loserNew = ranks.MinPointsFloor
+		if loserNew < ranks.MinRPFloor {
+			loserNew = ranks.MinRPFloor
 		}
 		if loserNew > loser.Points { // perder nunca sube los puntos
 			loserNew = loser.Points
 		}
 		// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
-		// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
+		// escudo (lo gana al ascender), cae solo al RP inicial de SU división y lo gasta.
 		if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
 			if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
 				loserNew = floor

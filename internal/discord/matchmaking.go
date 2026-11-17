@@ -1670,7 +1670,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 		return report, errors.New("no se encontraron los jugadores de matchmaking de esta reta")
 	}
 
-	// Glicko-2 se actualiza como una métrica independiente de LP.
+	// Glicko-2 se actualiza como una métrica independiente de RP.
 	// Ambos jugadores se calculan usando los ratings/RD anteriores al set.
 	now := time.Now()
 	winnerGlicko, loserGlicko := ranks.UpdateGlicko2Pair(
@@ -1689,7 +1689,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 
 	oldWinnerPts, oldLoserPts := winner.Points, loser.Points
 
-	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus LP
+	// CLASIFICACIÓN: quien no completó sus 5 sets aún no tiene rango. Sus RP
 	// suben/bajan con deltas FIJOS de clasificación y el neto de esos 5 sets
 	// decide el rango inicial. El rival ya clasificado cobra con las reglas
 	// normales (el clasificante cuenta con el nivel de sus puntos actuales).
@@ -1705,7 +1705,7 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 		// caer ante uno inferior cuesta más. Se recalculan AQUÍ, con los rangos
 		// reales al terminar el set (el stake de la reta era solo estimado).
 		stake = ranks.WinPoints(winner.Points, loser.Points)
-		// Bonos de LP: racha caliente (la 3ª victoria seguida y las siguientes
+		// Bonos de RP: racha caliente (la 3ª victoria seguida y las siguientes
 		// pagan extra; winner.Streak aún es la racha ANTES de este set) y set
 		// perfecto sin ceder games. Mismas reglas que la liquidación web.
 		stake += ranks.StreakBonus(winner.Streak)
@@ -1731,14 +1731,14 @@ func applyMatchResult(tx *gorm.DB, m *models.Matchmaking) (matchReport, error) {
 			loserNew = ranks.PlacementFloor
 		}
 	} else {
-		if loserNew < ranks.MinPointsFloor {
-			loserNew = ranks.MinPointsFloor
+		if loserNew < ranks.MinRPFloor {
+			loserNew = ranks.MinRPFloor
 		}
 		if loserNew > loser.Points { // perder nunca sube los puntos
 			loserNew = loser.Points
 		}
 		// Escudo anti-descenso: si la derrota lo bajaría de división y tiene el
-		// escudo (lo gana al ascender), cae solo a 0 LP de SU división y lo gasta.
+		// escudo (lo gana al ascender), cae solo al RP inicial de SU división y lo gasta.
 		if oldIdx := ranks.DivisionIndexOf(loser.Points); ranks.DivisionIndexOf(loserNew) < oldIdx && loser.DemotionShield {
 			if floor := ranks.DivisionFloor(oldIdx); loserNew < floor {
 				loserNew = floor
