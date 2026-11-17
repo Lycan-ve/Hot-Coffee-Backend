@@ -10,17 +10,17 @@ const (
 	LosePointsSameTier = 5  // derrota contra tu mismo nivel
 	WinBonusPerTier    = 10 // bonus por cada nivel MÁS ALTO del rival vencido
 	LosePenaltyPerTier = 5  // castigo extra por cada nivel MÁS BAJO del rival
-	MinPointsFloor     = 5  // piso: nadie baja de 5 puntos ganados
+	MinRPFloor        = 0  // piso: nadie baja de 0 RP
 	StreakForUpperTier = 3  // racha de victorias que habilita rival de un rango arriba
 
-	// Bonos de LP (economía v2): premian el buen momento sin descontrolar
+	// Bonos de RP (economía v2): premian el buen momento sin descontrolar
 	// el ritmo de subida (una racha larga sigue limitada por el tope).
-	WinStreakBonus = 5  // LP extra por cada victoria DENTRO de una racha de 3+
+	WinStreakBonus = 5  // RP extra por cada victoria DENTRO de una racha de 3+
 	StreakBonusCap = 15 // tope del bonus de racha (desde la 6ª victoria seguida)
 	FlawlessBonus  = 5  // set perfecto: el ganador no cedió ni un game
 )
 
-// StreakBonus: LP extra que paga la victoria actual por venir en racha.
+// StreakBonus: RP extra que paga la victoria actual por venir en racha.
 // Recibe la racha ANTES de anotar esta victoria (3 victorias ya ganadas →
 // esta es la 4ª consecutiva). 3ª victoria: +5, 4ª: +10, 5ª: +15, 6ª+: +15
 // (tope). Devuelve 0 si la racha aún no califica.
@@ -73,7 +73,7 @@ func WinPoints(winnerPoints, loserPoints int) int {
 }
 
 // LosePoints: puntos que pierde el PERDEDOR (positivo; el llamador le aplica
-// el piso de MinPointsFloor). Caer ante un nivel inferior cuesta más:
+// el piso de MinRPFloor). Caer ante un nivel inferior cuesta más:
 // +LosePenaltyPerTier por cada nivel que el perdedor esté por encima del ganador.
 func LosePoints(winnerPoints, loserPoints int) int {
 	diff := TierIndex(loserPoints) - TierIndex(winnerPoints)
@@ -93,16 +93,16 @@ func MaxStakeOf(pointsA, pointsB int) int {
 	return WinPoints(lo, hi)
 }
 
-// DivisionIndexOf: índice de división (0 = Iron I … 25 = Challenger) de unos
-// puntos GANADOS. La división i arranca en (i+1)·100 puntos TOTALES, es
-// decir, (i+1)·100 − BasePoints puntos ganados.
-func DivisionIndexOf(pointsWon int) int {
-	return FromPoints(pointsWon + BasePoints).DivisionIndex
+// DivisionIndexOf: índice de la división actual a partir del RP del jugador.
+func DivisionIndexOf(rp int) int {
+	return FromPoints(rp).DivisionIndex
 }
 
-// DivisionFloor: puntos ganados exactos del inicio de la división idx (0 LP).
-// Es donde aterriza una derrota consumiendo el escudo anti-descenso.
+// DivisionFloor: RP total exacto en el que comienza la división idx.
 func DivisionFloor(idx int) int {
-	return (idx+1)*LPPerDivision - BasePoints
+	if idx < 0 {
+		return 0
+	}
+	return idx * RPPerDivision
 }
 
