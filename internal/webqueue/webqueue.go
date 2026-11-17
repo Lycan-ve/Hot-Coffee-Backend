@@ -19,10 +19,9 @@ import (
 const (
 	matchmakingLeague = "2xko_online"
 
-	// Emparejamiento EQUITATIVO por rango: Gold I, II y III son el mismo
-	// nivel. Con racha de 3+ victorias se busca un rival de UN rango más alto.
-	// Fallback para no dejar a nadie esperando para siempre: tras 2 min se
-	// aceptan rangos adyacentes y tras 4 min, cualquiera.
+	// Emparejamiento por Glicko-2: compara rating y RD de ambos jugadores,
+	// prioriza la menor distancia normalizada y amplía la ventana por espera.
+	// Tras 4 min se permite cualquier diferencia para evitar colas bloqueadas.
 	adjacentTierAfter = 2 * time.Minute
 	anyTierAfter      = 4 * time.Minute
 
@@ -310,11 +309,11 @@ func requeue(tx *gorm.DB, discordID string, ft int, joinedAt time.Time) {
 // Emparejador
 // ---------------------------------------------------------------------------
 
-// tryMatch empareja (en una transacción con lock de filas) a los jugadores de
-// la cola: recorre por antigüedad y junta a cada jugador con el primer rival
-// disponible de SU RANGO (partidas equitativas; con racha, un rango arriba).
+// tryMatch recorre la cola por antigüedad y busca el rival elegible más cercano
+// según Glicko-2 (rating + RD). La progresión visible sigue siendo LP/rango.
 func tryMatch() error {
 	return db.Transaction(func(tx *gorm.DB) error {
+		matchNow := time.Now()
 		var entries []models.MatchmakingQueue
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Order("joined_at ASC, discord_id ASC").Find(&entries).Error; err != nil {
@@ -363,25 +362,25 @@ func tryMatch() error {
 			// normalizada por la incertidumbre de ambos jugadores.
 			bestJ := -1
 			bestDistance := 1e99
-			waited := time.Since(a.JoinedAt)
+			waited := matchNow.Sub(a.JoinedAt)
 			for j := i + 1; j < len(entries); j++ {
 				b := entries[j]
 				if paired[b.DiscordID] || a.DiscordID == b.DiscordID {
 					continue
 				}
-				if !canPairByGlicko(a, b, playerRatings, waited, time.Now()) {
+				if !canPairByGlicko(a, b, playerRatings, waited, matchNow) {
 					continue
 				}
 				// No repetir rival reciente… salvo que alguno de los dos ya
 				// espere demasiado: repetir es mejor que esperar de más.
 				if isRematch(a, b) &&
-					time.Since(a.JoinedAt) < rematchFallbackAfter &&
-					time.Since(b.JoinedAt) < rematchFallbackAfter {
+					matchNow.Sub(a.JoinedAt) < rematchFallbackAfter &&
+					matchNow.Sub(b.JoinedAt) < rematchFallbackAfter {
 					continue
 				}
 				distance := ranks.Glicko2DistanceSigma(
-					glickoStateOf(playerRatings[a.DiscordID], time.Now()),
-					glickoStateOf(playerRatings[b.DiscordID], time.Now()),
+					glickoStateOf(playerRatings[a.DiscordID], matchNow),
+					glickoStateOf(playerRatings[b.DiscordID], matchNow),
 				)
 				if distance < bestDistance {
 					bestDistance = distance
@@ -407,8 +406,8 @@ func tryMatch() error {
 				TargetFT:         3,
 				PointsAtStake:    ranks.MaxStakeOf(a.Points, b.Points),
 				Status:           proposalWaiting,
-				CreatedAt:        time.Now(),
-				ExpiresAt:        time.Now().Add(proposalTTL),
+				CreatedAt:        matchNow,
+				ExpiresAt:        matchNow.Add(proposalTTL),
 			}
 			if err := tx.Create(&proposal).Error; err != nil {
 				return err
@@ -673,9 +672,11 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		playerRatings := make(map[string]models.MatchmakingPlayer, len(ids))
 		if len(ids) > 0 {
 			var players []models.MatchmakingPlayer
-			if err := db.Select("discord_id", "glicko_rating", "glicko_rd", "glicko_volatility").
+			if err := db.Select("discord_id", "glicko_rating", "glicko_rd", "glicko_volatility", "glicko_last_rated_at").
 				Where("discord_id IN ?", ids).Find(&players).Error; err != nil {
 				log.Printf("⚠️ WebQueue: no se pudieron leer ratings Glicko-2: %v", err)
+				writeErr(w, http.StatusInternalServerError, "bd", "No se pudo consultar el rating de habilidad. Intenta de nuevo.")
+				return
 			} else {
 				for _, player := range players {
 					playerRatings[player.DiscordID] = player
