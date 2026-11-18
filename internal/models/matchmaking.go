@@ -1,3 +1,4 @@
+
 package models
 
 import "time"
@@ -98,4 +99,7 @@ type MatchmakingPlayer struct {
 	// guarda en matchmaking_players.
 	Country string `gorm:"-" json:"country,omitempty"`
 	State   string `gorm:"-" json:"state,omitempty"`
+	// Plataformas de juego (PC/PS5/XBOX) leídas de users al servir la API;
+	// no se guardan en matchmaking_players.
+	Platforms []string `gorm:"-" json:"platforms,omitempty"`
 }

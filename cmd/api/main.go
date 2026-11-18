@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -185,6 +186,31 @@ func locationMap(ids []string) map[string][2]string {
 	return locs
 }
 
+// platformMap lee las plataformas de juego (users.platforms, "PC,PS5") de los
+// IDs de Discord dados. Igual que la nacionalidad, vive en users y se mueve
+// al ranking de matchmaking al servir la API.
+func platformMap(ids []string) map[string][]string {
+	out := make(map[string][]string, len(ids))
+	if len(ids) == 0 {
+		return out
+	}
+	var users []models.User
+	if err := db.Select("discord_id, platforms").Where("discord_id IN ? AND platforms <> ''", ids).Find(&users).Error; err != nil {
+		log.Println("⚠️ Rankings: no se pudieron leer las plataformas:", err)
+		return out
+	}
+	for _, u := range users {
+		plats := []string{}
+		for _, p := range strings.Split(u.Platforms, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				plats = append(plats, p)
+			}
+		}
+		out[u.DiscordID] = plats
+	}
+	return out
+}
+
 // applyProfileLocations rellena la nacionalidad de cada jugador del ranking de
 // torneos (models.Player.Country/State no se guardan en la tabla players: se
 // resuelven contra users por discord_id al servir la API).
@@ -243,11 +269,13 @@ func HandleGetMatchmakingRankings(w http.ResponseWriter, r *http.Request) {
 		ids = append(ids, p.DiscordID)
 	}
 	locs := locationMap(ids)
+	plats := platformMap(ids)
 	for i := range players {
 		if l, ok := locs[players[i].DiscordID]; ok {
 			players[i].Country = l[0]
 			players[i].State = l[1]
 		}
+		players[i].Platforms = plats[players[i].DiscordID]
 	}
 
 	json.NewEncoder(w).Encode(players)
